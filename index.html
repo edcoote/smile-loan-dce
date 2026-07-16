@@ -1,0 +1,394 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>21D — Patient Preference Survey (Demo)</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --ink:#251b34; --plum:#3b2a55; --plum-deep:#2b1f41;
+    --violet:#7d4fa8; --violet-soft:#efe7f7; --violet-line:#d7c4ec;
+    --paper:#f7f4fb; --card:#ffffff; --line:#e6ddf0; --hair:#efe8f6;
+    --slate:#5f5870; --slate2:#6f6880; --wash:#f3eefa; --track:#e7dff1;
+    --seg-bg:#241736; --seg-off:#a99cbe; --optout:#8a7fa0; --warn:#8a5a12;
+    --radius:14px;
+    --disp:"Fraunces",Georgia,"Times New Roman",serif;
+    --body:"Inter",system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;padding:0}
+  body{font-family:var(--body);background:var(--paper);color:var(--ink);font-size:18px;line-height:1.55;-webkit-font-smoothing:antialiased}
+
+  .demobar{background:var(--plum-deep);color:#eae4f2;font-size:14px;display:flex;flex-wrap:wrap;gap:18px 26px;align-items:center;padding:12px 22px;position:sticky;top:0;z-index:50}
+  .demobar .tag{font-weight:600;letter-spacing:.14em;font-size:11px;text-transform:uppercase;background:var(--violet);color:#fff;padding:3px 9px;border-radius:5px}
+  .demobar label{display:inline-flex;align-items:center;gap:8px;cursor:pointer;color:#ccc2dd}
+  .demobar strong{color:#fff;font-weight:600}
+  .seg{display:inline-flex;background:var(--seg-bg);border-radius:8px;padding:3px;gap:3px}
+  .seg button{font-family:var(--body);font-size:13px;color:var(--seg-off);background:transparent;border:0;padding:6px 12px;border-radius:6px;cursor:pointer;font-weight:500}
+  .seg button[aria-pressed="true"]{background:var(--violet);color:#fff}
+  .switch{position:relative;width:38px;height:22px;flex:none}
+  .switch input{opacity:0;width:0;height:0;position:absolute}
+  .slider{position:absolute;inset:0;background:#4b3a63;border-radius:22px;transition:.2s}
+  .slider::before{content:"";position:absolute;height:16px;width:16px;left:3px;top:3px;background:#fff;border-radius:50%;transition:.2s}
+  .switch input:checked+.slider{background:var(--violet)}
+  .switch input:checked+.slider::before{transform:translateX(16px)}
+
+  .wrap{max-width:900px;margin:0 auto;padding:34px 22px 90px}
+  .brand{display:flex;align-items:center;gap:13px;margin-bottom:6px}
+  .mark{width:34px;height:34px;border-radius:9px;background:var(--plum);position:relative;flex:none}
+  .mark::after{content:"";position:absolute;left:8px;right:8px;bottom:9px;height:9px;border:2.5px solid var(--violet);border-top:0;border-radius:0 0 40px 40px}
+  .brand h1{font-family:var(--disp);font-weight:600;font-size:21px;margin:0;letter-spacing:-.01em}
+  .brand span{color:var(--slate2);font-size:13px}
+
+  .progress{height:6px;background:var(--track);border-radius:6px;margin:20px 0 30px;overflow:hidden}
+  .progress i{display:block;height:100%;background:var(--plum);border-radius:6px;transition:width .35s ease}
+
+  .step{display:none;animation:rise .34s ease both}
+  .step.on{display:block}
+  @keyframes rise{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:none}}
+  @media (prefers-reduced-motion:reduce){.step.on{animation:none}}
+
+  .eyebrow{font-size:12.5px;letter-spacing:.16em;text-transform:uppercase;color:var(--violet);font-weight:600;margin-bottom:10px}
+  h2{font-family:var(--disp);font-weight:600;font-size:30px;line-height:1.15;letter-spacing:-.015em;margin:0 0 14px}
+  .lede{font-size:19px;color:var(--slate);max-width:60ch;margin:0 0 24px}
+  p{margin:0 0 15px}
+
+  .note{display:none;border-left:3px solid var(--violet);background:var(--violet-soft);padding:13px 16px;border-radius:0 10px 10px 0;font-size:15px;color:#4a3663;margin:18px 0 4px}
+  body.annot .note{display:block}
+  .note b{color:var(--plum-deep)}
+
+  .q{margin:0 0 26px}
+  .q>label.qlab{display:block;font-weight:600;font-size:17px;margin-bottom:11px}
+  .opts{display:grid;gap:10px}
+  .opt{display:flex;align-items:center;gap:13px;border:1.5px solid var(--line);background:var(--card);border-radius:11px;padding:14px 16px;cursor:pointer;transition:border-color .15s,background .15s}
+  .opt:hover{border-color:var(--violet-line)}
+  .opt input{accent-color:var(--plum);width:20px;height:20px;flex:none}
+  .opt.sel{border-color:var(--violet);background:var(--wash)}
+  .opt .sub{color:var(--slate2);font-size:14px}
+
+  /* how it works */
+  .explain{background:var(--card);border:1.5px solid var(--plum);border-radius:var(--radius);padding:22px 22px 10px;box-shadow:0 1px 0 var(--plum)}
+  .explain h3{font-family:var(--disp);font-size:20px;margin:0 0 3px;font-weight:600}
+  .explain .who{color:var(--slate2);font-size:13.5px;margin-bottom:14px}
+  .explain ul{list-style:none;margin:0;padding:0}
+  .explain li{display:flex;gap:12px;padding:10px 0;border-top:1px solid var(--hair);font-size:16px}
+  .explain li:first-child{border-top:0}
+  .explain li .k{color:var(--slate2);min-width:120px;flex:none}
+  .explain li .v{font-weight:500}
+  .tick{color:var(--violet);font-weight:700}
+  .altbox{margin-top:16px;background:var(--wash);border-radius:12px;padding:14px 18px;font-size:15.5px;color:var(--slate)}
+  .altbox b{color:var(--ink)}
+
+  .taskhead{display:flex;justify-content:space-between;align-items:baseline;flex-wrap:wrap;gap:6px;margin-bottom:4px}
+  .taskhead .cnt{color:var(--slate2);font-size:14px}
+  .fixed{font-size:14.5px;color:var(--slate);margin:0 0 20px}
+  .fixed b{color:var(--ink)}
+  .cards{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+  .choice{position:relative;background:var(--card);border:1.5px solid var(--line);border-radius:var(--radius);padding:0;cursor:pointer;overflow:hidden;transition:border-color .15s,box-shadow .15s;display:flex;flex-direction:column;text-align:left;font-family:inherit}
+  .choice:hover{border-color:var(--violet-line)}
+  .choice:focus-visible{outline:3px solid var(--violet);outline-offset:2px}
+  .choice[aria-checked="true"]{border-color:var(--violet);box-shadow:0 0 0 3px var(--violet-soft)}
+  .choice[aria-checked="true"] .chead{background:var(--violet);color:#fff}
+  .chead{background:var(--plum);color:#eee9f4;padding:14px 18px;font-family:var(--disp);font-weight:600;font-size:17px;transition:background .15s}
+  .choice.optout .chead{background:var(--optout)}
+  .choice[aria-checked="true"].optout .chead{background:var(--violet)}
+  .cbody{padding:16px 18px;flex:1;display:flex;flex-direction:column;gap:12px}
+  .headline{background:var(--wash);border-radius:10px;padding:11px 13px;margin:-2px 0 2px}
+  .headline .big{font-family:var(--disp);font-size:25px;font-weight:600;color:var(--plum);display:block;line-height:1.1}
+  .headline small{color:var(--slate2);font-size:13px}
+  .choice[aria-checked="true"] .headline .big{color:var(--violet)}
+  .row{font-size:15px;line-height:1.35}
+  .row .rk{color:var(--slate2);font-size:12.5px;letter-spacing:.02em;display:block;margin-bottom:1px}
+  .row .rv{font-weight:600;font-size:15.5px}
+  .catch{font-size:13.5px;color:var(--warn);display:flex;gap:7px;align-items:flex-start}
+  .catch::before{content:"!";flex:none;width:16px;height:16px;border-radius:50%;background:var(--warn);color:#fff;font-size:11px;font-weight:700;text-align:center;line-height:16px}
+  .pickbar{border-top:1px solid var(--hair);padding:12px 18px;font-size:13.5px;font-weight:600;color:var(--slate2);display:flex;align-items:center;gap:8px}
+  .choice[aria-checked="true"] .pickbar{color:var(--violet)}
+  .dot{width:16px;height:16px;border-radius:50%;border:2px solid var(--line);flex:none}
+  .choice[aria-checked="true"] .dot{border-color:var(--violet);background:var(--violet);box-shadow:inset 0 0 0 3px #fff}
+
+  .certainty{margin-top:22px;background:var(--card);border:1.5px dashed var(--violet-line);border-radius:12px;padding:16px 18px;display:none}
+  .certainty.show{display:block;animation:rise .3s ease both}
+  .certainty p{font-weight:600;margin:0 0 12px;font-size:16px}
+  .chips{display:flex;gap:10px;flex-wrap:wrap}
+  .chip{border:1.5px solid var(--line);background:#fff;border-radius:22px;padding:9px 18px;cursor:pointer;font-family:inherit;font-size:15px;color:var(--ink)}
+  .chip[aria-pressed="true"]{background:var(--plum);border-color:var(--plum);color:#fff}
+
+  .nav{display:flex;justify-content:space-between;align-items:center;margin-top:34px;gap:14px}
+  button.btn{font-family:inherit;font-size:16px;font-weight:600;border-radius:10px;padding:13px 26px;cursor:pointer;border:1.5px solid transparent}
+  .btn.primary{background:var(--plum);color:#fff}
+  .btn.primary:hover{background:var(--plum-deep)}
+  .btn.ghost{background:transparent;color:var(--slate);border-color:var(--line)}
+  .btn.ghost:hover{border-color:var(--violet-line)}
+  .btn.ghost.hide{visibility:hidden}
+
+  .done{text-align:center;padding:26px 0}
+  .done .mark{width:52px;height:52px;margin:0 auto 18px}
+  .summary{text-align:left;background:var(--card);border:1.5px solid var(--line);border-radius:var(--radius);padding:8px 22px;margin-top:26px}
+  .summary h3{font-family:var(--disp);font-size:17px;margin:18px 0 4px}
+  .summary .mrow{display:flex;gap:12px;padding:12px 0;border-top:1px solid var(--hair);font-size:15px}
+  .summary .mrow:first-of-type{border-top:0}
+  .summary .mrow b{color:var(--violet);min-width:150px;flex:none}
+
+  @media (max-width:760px){
+    body{font-size:17px}
+    .cards{grid-template-columns:1fr}
+    h2{font-size:25px}
+    .wrap{padding:26px 16px 80px}
+  }
+</style>
+</head>
+<body class="annot">
+
+<div class="demobar" role="region" aria-label="Demonstration controls">
+  <span class="tag">Demo</span>
+  <label style="gap:10px">
+    <strong>Sample&nbsp;frame:</strong>
+    <span class="seg" role="group" aria-label="Survey frame">
+      <button id="frameClinic" aria-pressed="true" onclick="setFrame('clinic')">In clinic</button>
+      <button id="frameFb" aria-pressed="false" onclick="setFrame('fb')">Facebook group</button>
+    </span>
+  </label>
+  <label>
+    <span class="switch"><input type="checkbox" id="annotToggle" checked onchange="document.body.classList.toggle('annot',this.checked)"><span class="slider"></span></span>
+    Show what each screen measures
+  </label>
+</div>
+
+<div class="wrap">
+  <div class="brand">
+    <div class="mark" aria-hidden="true"></div>
+    <div>
+      <h1>21D Patient Survey</h1>
+      <span id="frameLabel">How you'd prefer to pay for treatment · in-clinic version</span>
+    </div>
+  </div>
+  <div class="progress"><i id="bar" style="width:0"></i></div>
+
+  <!-- STEP 0 — WELCOME -->
+  <section class="step on" data-step="0">
+    <div class="eyebrow">About this survey</div>
+    <h2>How would you prefer to pay for treatment?</h2>
+    <p class="lede">We're always working to improve how we support our patients and make treatment more accessible. This short survey helps us understand what matters most to you when it comes to paying for treatment.</p>
+    <p>On the next screens we'll show you different ways of paying and ask which you'd choose. It takes about five minutes, there are no right answers, and taking part commits you to nothing.</p>
+    <div class="note"><b>Leadership:</b> patient-facing framing kept general (improving support), not policy-specific. Same instrument in both frames; only the sample and the "do nothing" option change.</div>
+  </section>
+
+  <!-- STEP 1 — ABOUT YOU -->
+  <section class="step" data-step="1">
+    <div class="eyebrow">A little about you</div>
+    <h2>First, a few quick questions</h2>
+    <p class="lede">These help us understand who prefers what. We never ask for an exact figure.</p>
+
+    <div class="q">
+      <label class="qlab">Which age group are you in?</label>
+      <div class="opts" data-single>
+        <label class="opt"><input type="radio" name="age"> <span>Under 60</span></label>
+        <label class="opt"><input type="radio" name="age"> <span>60&ndash;64</span></label>
+        <label class="opt"><input type="radio" name="age"> <span>65&ndash;69</span></label>
+        <label class="opt"><input type="radio" name="age"> <span>70 or over</span></label>
+      </div>
+    </div>
+
+    <div class="q">
+      <label class="qlab">Which best describes the income you earn from work, before tax?</label>
+      <div class="opts" data-single>
+        <label class="opt"><input type="radio" name="inc"> <span>I'm not working / retired</span></label>
+        <label class="opt"><input type="radio" name="inc"> <span>Under &pound;20,000 <span class="sub">&mdash; per year</span></span></label>
+        <label class="opt"><input type="radio" name="inc"> <span>&pound;20,000 &ndash; &pound;34,999</span></label>
+        <label class="opt"><input type="radio" name="inc"> <span>&pound;35,000 &ndash; &pound;54,999</span></label>
+        <label class="opt"><input type="radio" name="inc"> <span>&pound;55,000 or more</span></label>
+        <label class="opt"><input type="radio" name="inc"> <span>Prefer not to say</span></label>
+      </div>
+      <div class="note"><b>Measures &mdash; earned income (banded).</b> A covariate. We ask about <i>work</i> income specifically because that's what repayments are based on &mdash; pension income never counts. Lets us test who values a lower threshold and check the segment mix.</div>
+    </div>
+
+    <div class="q">
+      <label class="qlab">If you paid for treatment yourself, how would you most likely fund it?</label>
+      <div class="opts" data-single>
+        <label class="opt"><input type="radio" name="fund"> <span>Savings</span></label>
+        <label class="opt"><input type="radio" name="fund"> <span>Credit card</span></label>
+        <label class="opt"><input type="radio" name="fund"> <span>Loan from family or friends</span></label>
+        <label class="opt"><input type="radio" name="fund"> <span>A bank or personal loan</span></label>
+        <label class="opt"><input type="radio" name="fund"> <span>A clinic finance / payment plan</span></label>
+        <label class="opt"><input type="radio" name="fund"> <span>I couldn't afford it</span></label>
+      </div>
+      <div class="note"><b>Measures &mdash; hidden borrowing.</b> Turns "most pay cash" into evidence: how much of that "cash" is really credit-card or family debt.</div>
+    </div>
+  </section>
+
+  <!-- STEP 2 — HOW THE SMILE LOAN WORKS -->
+  <section class="step" data-step="2">
+    <div class="eyebrow">Before you choose</div>
+    <h2>How the Smile Loan would work</h2>
+    <p class="lede">The treatment is the same in every case &mdash; a full-jaw dental implant solution priced at <b>&pound;16,995</b>. What changes is how you pay for it.</p>
+    <div class="explain">
+      <h3>A Smile Loan</h3>
+      <div class="who">A possible new payment option</div>
+      <ul>
+        <li><span class="k">No deposit</span><span class="v">You start treatment without paying anything up front.</span></li>
+        <li><span class="k">You repay</span><span class="v">A set share of what you earn <b>from work</b>, and only while you earn above a set amount.</span></li>
+        <li><span class="k tick">Your pension is safe</span><span class="v">Nothing is ever taken from your state or private pension &mdash; repayments come only from money you earn from working.</span></li>
+        <li><span class="k tick">It ends when you stop</span><span class="v">When you stop working or retire, repayments stop. Anything still owing is written off &mdash; and always cancelled on death.</span></li>
+      </ul>
+    </div>
+    <div class="altbox">In the choices, the Smile Loan's <b>repayment share, threshold and any upfront fee will change</b> from one option to the next. Everything on this page stays the same.</div>
+    <div class="note"><b>Leadership:</b> the write-off is now stated as a fixed feature, not a lever &mdash; because repayments are earned-income-only, retirement already stops them and the write-off age is nearly cost-neutral for this cohort. Variation is on the levers that actually bite: rate, threshold, fee.</div>
+  </section>
+
+  <!-- STEP 3 — CHOICE TASK 1 (moderate terms) -->
+  <section class="step" data-step="3">
+    <div class="taskhead"><div class="eyebrow" style="margin:0">Your choice</div><div class="cnt">Choice 1 of 2</div></div>
+    <h2>Which would you choose?</h2>
+    <p class="fixed">Treatment: <b>full-jaw dental implant solution</b> &middot; Price: <b>&pound;16,995</b> (the same either way)</p>
+    <div class="cards" role="radiogroup" aria-label="Choice 1">
+      <button type="button" class="choice" role="radio" aria-checked="false" data-task="t1" onclick="pick(this)">
+        <div class="chead">Smile Loan</div>
+        <div class="cbody">
+          <div class="headline"><span class="big">&asymp; &pound;37 / month</span><small>off your take-home while you work, if you earn &pound;30,000</small></div>
+          <div class="row"><span class="rk">You repay</span><span class="rv">9% of income above &pound;25,000/yr</span></div>
+          <div class="row"><span class="rk">Upfront fee</span><span class="rv">None</span></div>
+          <div class="row"><span class="rk">Your pension</span><span class="rv">Never touched</span></div>
+          <div class="catch">A loan in your name, repaid from your wages until you retire.</div>
+        </div>
+        <div class="pickbar"><span class="dot"></span> Choose this</div>
+      </button>
+
+      <button type="button" class="choice optout" role="radio" aria-checked="false" data-task="t1" onclick="pick(this)">
+        <div class="chead" data-optout-head>Pay it myself now</div>
+        <div class="cbody" data-optout-body>
+          <div class="headline"><span class="big">&pound;16,995</span><small>as a lump sum &mdash; or our finance plan below</small></div>
+          <div class="row"><span class="rk">Finance plan</span><span class="rv">&pound;3,000 deposit + &pound;293.76/mo for 5 yrs (9.9% APR)</span></div>
+          <div class="row"><span class="rk">Income deductions</span><span class="rv">None</span></div>
+          <div class="row"><span class="rk">Afterwards</span><span class="rv">Debt-free once paid</span></div>
+        </div>
+        <div class="pickbar"><span class="dot"></span> Choose this</div>
+      </button>
+    </div>
+    <div class="certainty" data-cert="t1">
+      <p>How sure are you about that choice?</p>
+      <div class="chips" role="group">
+        <button type="button" class="chip" aria-pressed="false" onclick="setCert(this)">Definitely would</button>
+        <button type="button" class="chip" aria-pressed="false" onclick="setCert(this)">Probably would</button>
+        <button type="button" class="chip" aria-pressed="false" onclick="setCert(this)">Might</button>
+      </div>
+    </div>
+    <div class="note"><b>Measures.</b> Moderate terms, against the real status quo. Someone who could pay cash and dislikes debt has a genuine reason to decline &mdash; that's what stops an automatic "yes" and lets us estimate who actually switches.</div>
+  </section>
+
+  <!-- STEP 4 — CHOICE TASK 2 (harsh terms) -->
+  <section class="step" data-step="4">
+    <div class="taskhead"><div class="eyebrow" style="margin:0">Your choice</div><div class="cnt">Choice 2 of 2</div></div>
+    <h2>And which would you choose here?</h2>
+    <p class="fixed">Same treatment, same <b>&pound;16,995</b> price &mdash; only the Smile Loan terms have changed.</p>
+    <div class="cards" role="radiogroup" aria-label="Choice 2">
+      <button type="button" class="choice" role="radio" aria-checked="false" data-task="t2" onclick="pick(this)">
+        <div class="chead">Smile Loan</div>
+        <div class="cbody">
+          <div class="headline"><span class="big">&asymp; &pound;187 / month</span><small>off your take-home while you work, if you earn &pound;30,000</small></div>
+          <div class="row"><span class="rk">You repay</span><span class="rv">15% of income above &pound;15,000/yr</span></div>
+          <div class="row"><span class="rk">Upfront fee</span><span class="rv">&pound;750</span></div>
+          <div class="row"><span class="rk">Your pension</span><span class="rv">Never touched</span></div>
+          <div class="catch">Takes a large share of your wages, plus a fee to start.</div>
+        </div>
+        <div class="pickbar"><span class="dot"></span> Choose this</div>
+      </button>
+
+      <button type="button" class="choice optout" role="radio" aria-checked="false" data-task="t2" onclick="pick(this)">
+        <div class="chead" data-optout-head>Pay it myself now</div>
+        <div class="cbody" data-optout-body>
+          <div class="headline"><span class="big">&pound;16,995</span><small>as a lump sum &mdash; or our finance plan below</small></div>
+          <div class="row"><span class="rk">Finance plan</span><span class="rv">&pound;3,000 deposit + &pound;293.76/mo for 5 yrs (9.9% APR)</span></div>
+          <div class="row"><span class="rk">Income deductions</span><span class="rv">None</span></div>
+          <div class="row"><span class="rk">Afterwards</span><span class="rv">Debt-free once paid</span></div>
+        </div>
+        <div class="pickbar"><span class="dot"></span> Choose this</div>
+      </button>
+    </div>
+    <div class="certainty" data-cert="t2">
+      <p>How sure are you about that choice?</p>
+      <div class="chips" role="group">
+        <button type="button" class="chip" aria-pressed="false" onclick="setCert(this)">Definitely would</button>
+        <button type="button" class="chip" aria-pressed="false" onclick="setCert(this)">Probably would</button>
+        <button type="button" class="chip" aria-pressed="false" onclick="setCert(this)">Might</button>
+      </div>
+    </div>
+    <div class="note"><b>Measures &mdash; the demand curve.</b> Harsher terms. Comparing choices as terms worsen shows how fast uptake falls &mdash; which reveals the <i>least generous</i> terms that still hit the target volume, i.e. the lowest subsidy to the Exchequer. The real survey repeats this 8&ndash;12 times per person from an efficient design.</div>
+  </section>
+
+  <!-- STEP 5 — DONE -->
+  <section class="step" data-step="5">
+    <div class="done">
+      <div class="mark" aria-hidden="true"></div>
+      <div class="eyebrow">All done</div>
+      <h2>Thank you</h2>
+      <p class="lede" style="margin-left:auto;margin-right:auto">That's everything &mdash; we're grateful for your time. Your answers help us improve how we support our patients.</p>
+    </div>
+    <div class="summary">
+      <h3>What this delivers (leadership view)</h3>
+      <div class="mrow"><b>Demand curve</b><span>How uptake falls as terms get harsher &mdash; so we can set the <i>least generous</i> terms that still hit target volume, minimising the subsidy. This is the number the Treasury cares about.</span></div>
+      <div class="mrow"><b>Substitution</b><span>From the <i>in-clinic</i> frame: the share who'd switch off "pay it myself now" onto a loan. Replaces the 15% deadweight assumption.</span></div>
+      <div class="mrow"><b>Induced demand</b><span>From the <i>Facebook-group</i> frame (opt-out = "stay as I am"): the share of priced-out prospects who convert. Replaces the "500 new patients" guess.</span></div>
+      <div class="mrow"><b>Hidden borrowing</b><span>From the funding question: how much "cash" is really credit-card / family debt.</span></div>
+      <div class="mrow"><b>External check</b><span>Against the real 9.9% plan: predicted uptake should track observed take-up of that plan.</span></div>
+    </div>
+  </section>
+
+  <div class="nav">
+    <button class="btn ghost hide" id="back" onclick="go(-1)">Back</button>
+    <button class="btn primary" id="next" onclick="go(1)">Start</button>
+  </div>
+</div>
+
+<script>
+  const steps=[...document.querySelectorAll('.step')];
+  const bar=document.getElementById('bar');
+  const back=document.getElementById('back'), next=document.getElementById('next');
+  let i=0; const LAST=steps.length-1;
+  function render(){
+    steps.forEach((s,n)=>s.classList.toggle('on',n===i));
+    bar.style.width=(i/LAST*100)+'%';
+    back.classList.toggle('hide',i===0);
+    next.textContent = i===0 ? 'Start' : (i===LAST ? 'Finish' : (i===LAST-1?'See results':'Continue'));
+    next.style.visibility = i===LAST ? 'hidden':'visible';
+    window.scrollTo({top:0,behavior:'smooth'});
+  }
+  function go(d){ i=Math.max(0,Math.min(LAST,i+d)); render(); }
+  document.querySelectorAll('.opts[data-single]').forEach(g=>{
+    g.addEventListener('change',()=>{ g.querySelectorAll('.opt').forEach(o=>o.classList.toggle('sel',o.querySelector('input').checked)); });
+  });
+  function pick(btn){
+    const task=btn.dataset.task;
+    document.querySelectorAll('.choice[data-task="'+task+'"]').forEach(c=>c.setAttribute('aria-checked','false'));
+    btn.setAttribute('aria-checked','true');
+    document.querySelector('.certainty[data-cert="'+task+'"]').classList.add('show');
+  }
+  function setCert(chip){
+    const box=chip.closest('.chips');
+    box.querySelectorAll('.chip').forEach(c=>c.setAttribute('aria-pressed','false'));
+    chip.setAttribute('aria-pressed','true');
+  }
+  var CLINIC_HEAD='Pay it myself now', FB_HEAD='Not go ahead';
+  var CLINIC_BODY='<div class="headline"><span class="big">\u00a316,995</span><small>as a lump sum \u2014 or our finance plan below</small></div>'+
+    '<div class="row"><span class="rk">Finance plan</span><span class="rv">\u00a33,000 deposit + \u00a3293.76/mo for 5 yrs (9.9% APR)</span></div>'+
+    '<div class="row"><span class="rk">Income deductions</span><span class="rv">None</span></div>'+
+    '<div class="row"><span class="rk">Afterwards</span><span class="rv">Debt-free once paid</span></div>';
+  var FB_BODY='<div class="headline"><span class="big">Stay as I am</span><small>for now \u2014 no treatment</small></div>'+
+    '<div class="row"><span class="rk">Cost</span><span class="rv">Nothing</span></div>'+
+    '<div class="row"><span class="rk">Repayments</span><span class="rv">None</span></div>'+
+    '<div class="row"><span class="rk">Treatment</span><span class="rv">Not now</span></div>';
+  function setFrame(f){
+    const clinic=f==='clinic';
+    document.getElementById('frameClinic').setAttribute('aria-pressed',clinic);
+    document.getElementById('frameFb').setAttribute('aria-pressed',!clinic);
+    document.getElementById('frameLabel').textContent = clinic ? "How you'd prefer to pay for treatment · in-clinic version" : "How you'd prefer to pay for treatment · prospective-group version";
+    document.querySelectorAll('[data-optout-head]').forEach(el=>{ el.textContent = clinic ? CLINIC_HEAD : FB_HEAD; });
+    document.querySelectorAll('[data-optout-body]').forEach(el=>{ el.innerHTML = clinic ? CLINIC_BODY : FB_BODY; });
+  }
+  render();
+</script>
+</body>
+</html>
