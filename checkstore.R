@@ -1,0 +1,5 @@
+﻿for (f in sort(list.files("app/R", pattern = "[.]R$", full.names = TRUE))) source(f, encoding = "UTF-8")
+st <- store_init()
+cat("backend:", st$kind, "\n")
+cat("dir:", Sys.getenv("SURVEY_DATA_DIR"), "\n")
+print(list.files(Sys.getenv("SURVEY_DATA_DIR")))
