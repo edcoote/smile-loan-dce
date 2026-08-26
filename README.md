@@ -40,9 +40,14 @@ Rscript dev/simulate.R 300             # populate dev/sim-data with fake respons
 
 URL parameters: `?admin=<key>` (fielding monitor), `?dev=1` (developer view on
 the thank-you page), `?bws_items=7`, `?dce_tasks=6`, `?dce_block=1`, `?split=1`,
-`?src=fb` (records recruitment source). The admin key comes from the
-`SURVEY_ADMIN_KEY` environment variable; the default is a placeholder and must
-be changed before anything is fielded.
+`?src=fb` (records recruitment source).
+
+The admin route **fails closed**: it comes from the `SURVEY_ADMIN_KEY`
+environment variable and, if that is unset, the route does not exist. There is
+deliberately no default. This repository is public and the admin panel exports
+the entire response set, so a committed default would be a published credential.
+Set it in the server environment (Posit Connect / shinyapps.io / systemd unit),
+never in the repository.
 
 ## Architecture
 
@@ -85,11 +90,30 @@ reportable — someone who abandons at DCE task 7 leaves seven usable tasks. The
 simulator injects an 18% abandonment rate specifically so the pipeline is
 exercised against that case.
 
-Backends share one interface: `memory` (browser/shinylive, download only),
-`csv` (server, the default), `postgrest` (Supabase). `store_backend = "auto"`
-probes for a writable filesystem and picks, so one codebase serves both
-deployments. The Supabase route grants the anon key INSERT only — no SELECT,
-no UPDATE, no DELETE — so a leaked key cannot pull responses back out.
+Backends share one interface, so the database is a deployment decision rather
+than a code change:
+
+| backend | use | needs |
+|---|---|---|
+| `memory` | shinylive in the browser; download only | — |
+| `csv` | local runs and quick tests | — |
+| `sqlite` | self-hosted Shiny Server or Posit Connect | `DBI`, `RSQLite` |
+| `postgres` | Neon, Azure, RDS, Render, your own server | `DBI`, `RPostgres` |
+| `postgrest` | Supabase | `httr`, `jsonlite` |
+
+`sqlite` and `postgres` are both thin wrappers over one generic `store_dbi()`,
+which also takes an arbitrary connection function for MariaDB or DuckDB.
+
+`store_backend = "auto"` resolves in order: Supabase if its variables are set,
+then `DATABASE_URL`, then `SURVEY_SQLITE`, then a writable filesystem, then
+memory. Supabase and Postgres deliberately win over the filesystem probe,
+because several hosts give you a writable disk that does not survive a
+container restart — picking `csv` there would look like it worked and lose the
+data.
+
+Supabase grants the anon key INSERT only — no SELECT, UPDATE or DELETE — so a
+leaked key cannot pull responses back out; reads need the service key, which
+belongs only in an environment the browser never sees.
 
 Export: the admin panel writes a multi-sheet workbook (README sheet plus the
 four tables) or a zip of CSVs. `writexl` is used when installed; otherwise the
@@ -170,7 +194,7 @@ Thursday decision can be revisited against data rather than re-argued.
   acknowledgement — neither needs correspondence, both need transcription.
 - **Replace the BWS item list.** The 13 items in `01-items.R` are placeholders
   standing in for the qualitative phase output.
-- Change `SURVEY_ADMIN_KEY` from the default.
+- Set `SURVEY_ADMIN_KEY` in the server environment.
 - Confirm the governance route (HRA decision tool, then REC) and register the
   SAP on OSF before the instrument is locked.
 - Item IDs are the join keys for the analysis pipeline and the Supabase schema.

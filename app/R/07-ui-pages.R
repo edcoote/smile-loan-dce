@@ -148,11 +148,17 @@ render_page <- function(page, i, rv) {
         p("That is everything \u2014 your answers have been recorded."),
         p("If you would like to talk to someone about treatment options, your own dentist is the right first step. They can refer you if implant treatment is appropriate for you."),
         div(class = "muted", "There is no payment or reward for taking part, and nothing you have said will be linked back to you.")),
+      if (isTRUE(rv$kiosk)) card(
+        div(class = "muted", "Clinic device \u2014 hand back to a member of staff."),
+        actionButton("btn_restart", "Start a new response", class = "btn-primary"),
+        div(class = "muted", style = "margin-top:8px;",
+            "This screen resets automatically so the next person starts fresh.")),
       if (isTRUE(rv$dev)) card(h4("Developer view"), tableOutput("dev_summary"),
                                downloadButton("dl_me", "Download this response (CSV)"))),
 
     screened_out = tagList(
       h3("Thank you for your interest"),
+      if (isTRUE(rv$kiosk)) card(actionButton("btn_restart", "Start a new response", class = "btn-primary")),
       card(p(switch(rv$screen_reason,
         under_18   = "This study is only open to adults, so it ends here.",
         non_uk     = "This study is about people living in the UK, so it ends here.",

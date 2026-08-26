@@ -22,7 +22,11 @@ CFG <- list(
   randomise_modules = TRUE,   # 50/50 module order at entry to section 3 (anti-priming)
   store_backend     = "auto", # "auto" | "csv" | "memory" | "postgrest"
   store_path        = "data",
-  admin_key         = Sys.getenv("SURVEY_ADMIN_KEY", "21d-admin"),
+  # Fails closed. With no SURVEY_ADMIN_KEY set in the server environment the
+  # admin route does not exist at all. This repository is public, so a default
+  # key committed here would be a published credential for an endpoint that
+  # exports the entire response set.
+  admin_key         = Sys.getenv("SURVEY_ADMIN_KEY", ""),
   quota_bands       = c("<50", "50-65", "66+"),
   quota_target      = c(120, 120, 120)  # per band; drives the lag flag in the admin panel
 )

@@ -128,45 +128,190 @@ store_csv <- function(path = CFG$store_path) {
 # admin panel should point at a service-role connection, not the survey's.
 store_postgrest <- function(url = Sys.getenv("SUPABASE_URL"),
                             key = Sys.getenv("SUPABASE_ANON_KEY"),
+                            service_key = Sys.getenv("SUPABASE_SERVICE_KEY"),
                             schema = "survey") {
   if (!nzchar(url) || !nzchar(key))
     stop("store_postgrest needs SUPABASE_URL and SUPABASE_ANON_KEY")
-  if (!requireNamespace("httr", quietly = TRUE))
-    stop("store_postgrest needs the httr package")
+  for (pkg in c("httr", "jsonlite"))
+    if (!requireNamespace(pkg, quietly = TRUE))
+      stop("store_postgrest needs the ", pkg, " package: install.packages('", pkg, "')")
+  base <- sub("/$", "", url)
   rev <- new.env(parent = emptyenv())
+
   post <- function(table, df) {
     r <- httr::POST(
-      paste0(sub("/$", "", url), "/rest/v1/", table),
+      paste0(base, "/rest/v1/", table),
       httr::add_headers(apikey = key, Authorization = paste("Bearer", key),
                         "Content-Type" = "application/json",
                         "Content-Profile" = schema, Prefer = "return=minimal"),
-      body = jsonlite::toJSON(df, na = "null", auto_unbox = FALSE), encode = "raw")
+      body = jsonlite::toJSON(df, na = "null", dataframe = "rows"), encode = "raw")
     if (httr::status_code(r) >= 300)
       warning("postgrest ", table, ": ", httr::status_code(r), " ",
-              substr(httr::content(r, "text", encoding = "UTF-8"), 1, 200))
+              substr(httr::content(r, "text", encoding = "UTF-8"), 1, 300))
     invisible(httr::status_code(r) < 300)
   }
+
+  # Reading requires the SERVICE key. The anon key is insert-only by design, so
+  # the admin panel and the export must run on a connection the browser never
+  # sees. If no service key is set, reading fails loudly rather than silently
+  # returning nothing.
+  get <- function(view) {
+    if (!nzchar(service_key))
+      stop("Reading needs SUPABASE_SERVICE_KEY. The anon key is insert-only.")
+    r <- httr::GET(
+      paste0(base, "/rest/v1/", view, "?select=*"),
+      httr::add_headers(apikey = service_key, Authorization = paste("Bearer", service_key),
+                        "Accept-Profile" = schema))
+    if (httr::status_code(r) >= 300)
+      stop("postgrest read ", view, ": ", httr::status_code(r), " ",
+           substr(httr::content(r, "text", encoding = "UTF-8"), 1, 300))
+    d <- jsonlite::fromJSON(httr::content(r, "text", encoding = "UTF-8"),
+                            simplifyDataFrame = TRUE)
+    if (!length(d) || !NROW(d)) store_schema()[[sub("^v_", "", view)]] else as.data.frame(d)
+  }
+
   list(
     kind = "postgrest",
     next_rev = function(rid) { k <- paste0("r", rid); v <- (rev[[k]] %||% 0L) + 1L; rev[[k]] <- v; v },
     append = function(table, df) if (nrow(df)) post(table, df) else invisible(TRUE),
-    read = function() stop("postgrest backend is insert-only; read via the service-role connection"),
+    # The v_ views already collapse to the latest revision per key, so
+    # store_latest() over them is a no-op rather than a second pass.
+    read = function() setNames(lapply(paste0("v_", STORE_TABLES), get), STORE_TABLES),
+    can_read = function() nzchar(service_key),
     healthy = function() TRUE
   )
+}
+
+# --- Backend: any DBI database ---------------------------------------------
+# One backend covering SQLite, PostgreSQL, MariaDB and DuckDB, so the choice of
+# database is a deployment decision rather than a code change. `connect` is a
+# zero-argument function returning a fresh DBI connection; it is called again
+# if the connection has dropped, which matters for managed Postgres services
+# that close idle connections after a few minutes.
+store_dbi <- function(connect, label = "dbi") {
+  if (!requireNamespace("DBI", quietly = TRUE))
+    stop("store_dbi needs the DBI package: install.packages('DBI')")
+  con <- NULL
+  live <- function() {
+    if (is.null(con) || !DBI::dbIsValid(con)) con <<- connect()
+    con
+  }
+  # Retry once on failure: a dropped connection should cost a reconnect, not a
+  # lost response.
+  with_con <- function(f) {
+    tryCatch(f(live()), error = function(e) { con <<- NULL; f(live()) })
+  }
+
+  sch <- store_schema()
+  with_con(function(cn) {
+    existing <- DBI::dbListTables(cn)
+    for (t in STORE_TABLES) {
+      if (!(t %in% existing)) {
+        DBI::dbCreateTable(cn, t, sch[[t]])
+        try(DBI::dbExecute(cn, sprintf("create index %s_rid_idx on %s (rid)", t, t)), silent = TRUE)
+      }
+    }
+  })
+
+  rev <- new.env(parent = emptyenv())
+
+  list(
+    kind = label,
+    next_rev = function(rid) {
+      k <- paste0("r", rid)
+      if (is.null(rev[[k]])) {
+        rev[[k]] <- with_con(function(cn) {
+          r <- DBI::dbGetQuery(cn, "select max(rev) as m from respondents where rid = ?", list(rid))
+          if (!nrow(r) || is.na(r$m[1])) 0L else as.integer(r$m[1])
+        })
+      }
+      rev[[k]] <- rev[[k]] + 1L
+      rev[[k]]
+    },
+    append = function(table, df) {
+      if (!nrow(df)) return(invisible(TRUE))
+      with_con(function(cn) DBI::dbAppendTable(cn, table, as.data.frame(df)))
+      invisible(TRUE)
+    },
+    read = function() with_con(function(cn)
+      setNames(lapply(STORE_TABLES, function(t) DBI::dbReadTable(cn, t)), STORE_TABLES)),
+    can_read = function() TRUE,
+    disconnect = function() if (!is.null(con) && DBI::dbIsValid(con)) DBI::dbDisconnect(con),
+    healthy = function() tryCatch(with_con(DBI::dbIsValid), error = function(e) FALSE),
+    # Hot backup. VACUUM INTO takes a consistent snapshot of a database that is
+    # being written to, so this is safe to run on a cron or Task Scheduler
+    # during fielding. Copying the file with the OS is NOT safe: it can catch a
+    # write mid-transaction and produce a snapshot that will not open.
+    snapshot = function(dest) {
+      dir.create(dirname(dest), recursive = TRUE, showWarnings = FALSE)
+      if (file.exists(dest)) unlink(dest)
+      with_con(function(cn) DBI::dbExecute(cn, sprintf("vacuum into '%s'", dest)))
+      invisible(dest)
+    },
+    # Returns "ok" on a healthy database, or a description of the corruption.
+    integrity = function() with_con(function(cn)
+      DBI::dbGetQuery(cn, "pragma integrity_check")[[1]][1])
+  )
+}
+
+# SQLite. No account, no service, no network — one file that is fully ACID and
+# handles survey-rate concurrency comfortably. The right choice for a
+# self-hosted Shiny Server or Posit Connect deployment where the disk persists.
+store_sqlite <- function(path = file.path(CFG$store_path, "responses.sqlite")) {
+  if (!requireNamespace("RSQLite", quietly = TRUE))
+    stop("store_sqlite needs RSQLite: install.packages('RSQLite')")
+  dir.create(dirname(path), recursive = TRUE, showWarnings = FALSE)
+  store_dbi(function() {
+    cn <- DBI::dbConnect(RSQLite::SQLite(), path)
+    # WAL lets readers and a writer coexist; busy_timeout makes a concurrent
+    # writer wait rather than fail. Without both, two respondents submitting at
+    # the same moment can produce "database is locked".
+    DBI::dbExecute(cn, "pragma journal_mode = WAL")
+    DBI::dbExecute(cn, "pragma busy_timeout = 10000")
+    DBI::dbExecute(cn, "pragma synchronous = NORMAL")
+    cn
+  }, label = "sqlite")
+}
+
+# Any PostgreSQL: Neon, Azure Database for PostgreSQL, RDS, Render, or a
+# database on your own server. Reads DATABASE_URL in the standard
+# postgres://user:password@host:port/dbname form.
+store_postgres <- function(url = Sys.getenv("DATABASE_URL")) {
+  if (!nzchar(url)) stop("store_postgres needs DATABASE_URL")
+  if (!requireNamespace("RPostgres", quietly = TRUE))
+    stop("store_postgres needs RPostgres: install.packages('RPostgres')")
+  store_dbi(function() DBI::dbConnect(RPostgres::Postgres(), dbname = url), label = "postgres")
 }
 
 # --- Factory ---------------------------------------------------------------
 # "auto" picks csv when the filesystem is writable (server) and memory when it
 # is not (shinylive in the browser), so one codebase serves both deployments.
+# "auto" resolution order matters. Supabase wins whenever it is configured,
+# because several hosts (shinyapps.io among them) give you a writable
+# filesystem that does not survive a container restart — so probing for
+# writability and picking csv would look like it worked and lose the data.
 store_init <- function(backend = CFG$store_backend, path = CFG$store_path) {
   if (identical(backend, "auto")) {
-    ok <- tryCatch({ dir.create(path, recursive = TRUE, showWarnings = FALSE)
-                     f <- file.path(path, ".probe"); file.create(f); unlink(f); TRUE },
-                   error = function(e) FALSE, warning = function(w) FALSE)
-    backend <- if (isTRUE(ok)) "csv" else "memory"
+    if (nzchar(Sys.getenv("SUPABASE_URL")) && nzchar(Sys.getenv("SUPABASE_ANON_KEY"))) {
+      backend <- "postgrest"
+    } else if (nzchar(Sys.getenv("DATABASE_URL"))) {
+      backend <- "postgres"
+    } else if (nzchar(Sys.getenv("SURVEY_SQLITE"))) {
+      backend <- "sqlite"
+    } else {
+      ok <- tryCatch({ dir.create(path, recursive = TRUE, showWarnings = FALSE)
+                       f <- file.path(path, ".probe"); file.create(f); unlink(f); TRUE },
+                     error = function(e) FALSE, warning = function(w) FALSE)
+      backend <- if (isTRUE(ok)) "csv" else "memory"
+    }
   }
   switch(backend,
     csv = store_csv(path), memory = store_memory(), postgrest = store_postgrest(),
+    postgres = store_postgres(),
+    sqlite = store_sqlite(if (nzchar(Sys.getenv("SURVEY_SQLITE")))
+                            Sys.getenv("SURVEY_SQLITE")
+                          else file.path(path, "responses.sqlite")),
+    dbi = stop("Call store_dbi(connect) directly for a custom connection"),
     stop("Unknown store backend: ", backend))
 }
 

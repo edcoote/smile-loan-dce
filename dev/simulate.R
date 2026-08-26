@@ -18,6 +18,7 @@
 args <- commandArgs(trailingOnly = TRUE)
 N   <- if (length(args) >= 1) as.integer(args[1]) else 300
 OUT <- if (length(args) >= 2) args[2] else "dev/sim-data"
+BE  <- if (length(args) >= 3) args[3] else "csv"   # csv | sqlite
 
 `%||%` <- function(a, b) if (is.null(a)) b else a
 # Run from the repository root.
@@ -26,7 +27,8 @@ for (f in sort(list.files("app/R", pattern = "[.]R$", full.names = TRUE))) sourc
 
 unlink(OUT, recursive = TRUE)
 CFG$store_path <- OUT
-STORE <- store_init("csv", OUT)
+STORE <- if (identical(BE, "sqlite")) store_sqlite(file.path(OUT, "responses.sqlite")) else store_init("csv", OUT)
+cat("Store backend:", STORE$kind, "\n")
 
 # --- True parameters -------------------------------------------------------
 TRUE_B <- c(rate = -0.28, fee = -0.45)   # fee per £100; both should be negative

@@ -119,6 +119,37 @@ store_export(st, xl)
 ok("workbook written", file.exists(xl) && file.size(xl) > 1000)
 unlink(tmp, recursive = TRUE)
 
+cat("\n== SQLite backend ==\n")
+if (!requireNamespace("RSQLite", quietly = TRUE)) {
+  cat("  skip  RSQLite not installed\n")
+} else {
+  tmp2 <- file.path(tempdir(), paste0("sq", as.integer(runif(1, 1e5, 9e5))))
+  sq <- store_sqlite(file.path(tmp2, "responses.sqlite"))
+  ok("connects and creates four tables", sq$healthy() && length(sq$read()) == 4)
+  rid2 <- new_rid()
+  ok("revision counter increments", identical(c(sq$next_rev(rid2), sq$next_rev(rid2)), c(1L, 2L)))
+  sq$append("items", rows_items(rid2, 1L, "core", list(core_srh = "Good"), 9))
+  sq$append("items", rows_items(rid2, 2L, "core", list(core_srh = "Fair"), 4))
+  ok("append-only keeps both revisions", nrow(sq$read()$items) == 2)
+  ok("latest revision wins on read", store_latest(sq$read())$items$value == "Fair")
+  set.seed(7)
+  sq$append("dce", rows_dce(rid2, 1L, dce_tasks_for(CFG)[1, ], "B", "Yes", "take_loan", 30000, 22))
+  ok("dce round-trips two rows with one chosen",
+     nrow(sq$read()$dce) == 2 && sum(sq$read()$dce$chosen) == 1)
+  xl2 <- file.path(tmp2, "x.xlsx")
+  ok("workbook exports from the database", { store_export(sq, xl2); file.size(xl2) > 1000 })
+  ok("integrity check passes", identical(sq$integrity(), "ok"))
+  snap <- file.path(tmp2, "snap.sqlite")
+  ok("hot snapshot is a valid database with the same rows", {
+    sq$snapshot(snap)
+    b <- DBI::dbConnect(RSQLite::SQLite(), snap)
+    on.exit(DBI::dbDisconnect(b), add = TRUE)
+    identical(DBI::dbGetQuery(b, "pragma integrity_check")[[1]][1], "ok") &&
+      DBI::dbGetQuery(b, "select count(*) n from items")$n == nrow(sq$read()$items)
+  })
+  sq$disconnect(); unlink(tmp2, recursive = TRUE)
+}
+
 cat("\n== Burden ==\n")
 g <- admin_burden_grid(CFG)
 ok("burden grid covers every catalogued design", nrow(g) == length(BWS_CATALOGUE) * 2 * 2)

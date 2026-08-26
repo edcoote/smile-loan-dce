@@ -41,7 +41,8 @@ server <- function(input, output, session) {
   if (!is.null(q$dce_block)) cfg$dce_block <- as.integer(q$dce_block)
   if (!is.null(q$split))     cfg$split_sample <- identical(q$split, "1")
 
-  is_admin <- !is.null(q$admin) && identical(q$admin, cfg$admin_key)
+  # Fail closed: no key in the environment means no admin route.
+  is_admin <- nzchar(cfg$admin_key) && !is.null(q$admin) && identical(q$admin, cfg$admin_key)
 
   rv <- reactiveValues(
     cfg = cfg, rid = new_rid(), rev = 0L, i = 1L,
@@ -54,7 +55,8 @@ server <- function(input, output, session) {
                                 ";src=", q$src %||% "direct"),
                 session = substr(session$token, 1, 12)),
     t_page = Sys.time(), t_start = Sys.time(),
-    dev = identical(q$dev, "1"))
+    dev = identical(q$dev, "1"),
+    kiosk = identical(q$kiosk, "1"))
 
   # --- persistence -------------------------------------------------------
   flush <- function(cap, status = NULL) {
@@ -117,6 +119,21 @@ server <- function(input, output, session) {
     session$sendCustomMessage("scrollTop", list())
   })
 
+  # Clinic devices are shared between patients. A full session reload is the
+  # only reset that cannot leak state: it discards every bound input value and
+  # issues a new respondent id, so patient 2 cannot inherit patient 1's
+  # part-answered page by having the same input ids still populated.
+  observeEvent(input$btn_restart, session$reload())
+
+  # And reset unattended, so a tablet left on someone's thank-you page does not
+  # greet the next person with it.
+  observe({
+    if (!isTRUE(rv$kiosk)) return()
+    if (!rv$flow[[rv$i]]$type %in% c("thanks", "screened_out")) return()
+    invalidateLater(90000, session)
+    isolate(if (rv$flow[[rv$i]]$type %in% c("thanks", "screened_out")) session$reload())
+  })
+
   observeEvent(input$btn_back, {
     rv$msg <- NULL
     rv$i <- max(2L, rv$i - 1L)   # never back into the landing page after consent
@@ -150,9 +167,19 @@ server <- function(input, output, session) {
     })
 
   # --- admin -------------------------------------------------------------
+  # The store may be insert-only (Supabase anon key with no service key set),
+  # in which case the monitor cannot read and says so rather than erroring.
+  can_read <- reactive(is.null(STORE$can_read) || isTRUE(STORE$can_read()))
+
   stats <- reactive({
     invalidateLater(15000, session)
+    req(can_read())
     admin_stats(STORE$read(), rv$cfg)
+  })
+
+  output$adm_backend <- renderText({
+    if (can_read()) sprintf("Backend: %s \u00B7 reads enabled", STORE$kind)
+    else sprintf("Backend: %s \u00B7 INSERT ONLY. Set SUPABASE_SERVICE_KEY in the server environment to enable the monitor and the export.", STORE$kind)
   })
 
   output$adm_cherries <- renderTable(stats()$cherries)

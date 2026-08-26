@@ -117,6 +117,7 @@ admin_ui <- function() {
   tagList(
     h3("Fielding monitor"),
     div(class = "muted", sprintf("%s \u00B7 app %s \u00B7 %s", INSTRUMENT_ID, APP_VERSION, now_utc())),
+    div(class = "muted", textOutput("adm_backend", inline = TRUE)),
     card(h4("Recruitment"), tableOutput("adm_cherries"), tableOutput("adm_reasons")),
     card(h4("Age quota"), tableOutput("adm_quota")),
     card(h4("Randomisation balance"), tableOutput("adm_arms")),
