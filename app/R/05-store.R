@@ -329,6 +329,18 @@ store_postgres <- function(url = Sys.getenv("DATABASE_URL")) {
 # filesystem that does not survive a container restart — so probing for
 # writability and picking csv would look like it worked and lose the data.
 store_init <- function(backend = CFG$store_backend, path = CFG$store_path) {
+  explicit <- nzchar(Sys.getenv("SURVEY_DATA_DIR"))
+  if (explicit) path <- Sys.getenv("SURVEY_DATA_DIR")
+
+  writable <- function(p) tryCatch({
+    dir.create(p, recursive = TRUE, showWarnings = FALSE)
+    if (!dir.exists(p)) return(FALSE)
+    f <- file.path(p, ".probe")
+    ok <- suppressWarnings(file.create(f))
+    if (isTRUE(ok)) unlink(f)
+    isTRUE(ok)
+  }, error = function(e) FALSE, warning = function(w) FALSE)
+
   if (identical(backend, "auto")) {
     if (nzchar(Sys.getenv("SUPABASE_URL")) && nzchar(Sys.getenv("SUPABASE_ANON_KEY"))) {
       backend <- "postgrest"
@@ -336,14 +348,27 @@ store_init <- function(backend = CFG$store_backend, path = CFG$store_path) {
       backend <- "postgres"
     } else if (nzchar(Sys.getenv("SURVEY_SQLITE"))) {
       backend <- "sqlite"
+    } else if (writable(path)) {
+      backend <- "csv"
+    } else if (explicit) {
+      # An explicit location was requested and cannot be written. Falling back
+      # to memory here would let a whole clinic session complete normally and
+      # then discard every response, with nothing on screen to indicate it. Fail
+      # at startup instead, while someone is still watching the console.
+      stop("SURVEY_DATA_DIR is set to '", path, "' but it cannot be created or written to.\n",
+           "  On a managed Windows machine the root of C: usually needs administrator rights.\n",
+           "  Try a location inside your user profile, for example:\n",
+           "    ", file.path(path.expand("~"), "21D-research", "barriers"), "\n",
+           "  Refusing to start rather than storing responses in memory and losing them.",
+           call. = FALSE)
     } else {
-      ok <- tryCatch({ dir.create(path, recursive = TRUE, showWarnings = FALSE)
-                       f <- file.path(path, ".probe"); file.create(f); unlink(f); TRUE },
-                     error = function(e) FALSE, warning = function(w) FALSE)
-      backend <- if (isTRUE(ok)) "csv" else "memory"
+      # No location was asked for and none is writable: this is the browser
+      # (shinylive) case, where memory-only is the correct behaviour.
+      backend <- "memory"
     }
   }
-  switch(backend,
+
+  st <- switch(backend,
     csv = store_csv(path), memory = store_memory(), postgrest = store_postgrest(),
     postgres = store_postgres(),
     sqlite = store_sqlite(if (nzchar(Sys.getenv("SURVEY_SQLITE")))
@@ -351,6 +376,20 @@ store_init <- function(backend = CFG$store_backend, path = CFG$store_path) {
                           else file.path(path, "responses.sqlite")),
     dbi = stop("Call store_dbi(connect) directly for a custom connection"),
     stop("Unknown store backend: ", backend))
+
+  # Say plainly where responses are going. The single most expensive mistake
+  # available here is running a session against the wrong store.
+  loc <- switch(backend,
+    csv = normalizePath(path, mustWork = FALSE),
+    sqlite = if (nzchar(Sys.getenv("SURVEY_SQLITE"))) Sys.getenv("SURVEY_SQLITE")
+             else file.path(path, "responses.sqlite"),
+    postgrest = Sys.getenv("SUPABASE_URL"),
+    postgres = sub(":[^:@]*@", ":***@", Sys.getenv("DATABASE_URL")),
+    memory = "IN MEMORY - NOTHING IS SAVED")
+  message("[store] backend=", backend, "  location=", loc)
+  if (identical(backend, "memory"))
+    message("[store] WARNING: responses will be lost when this session ends.")
+  st
 }
 
 # --- Row builders ----------------------------------------------------------
