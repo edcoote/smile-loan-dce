@@ -103,7 +103,7 @@ PATH_EXTRA <- list(
 # VERBATIM_REQUIRED — AOHS 2023, single self-rated oral health item, OGL v3.0.
 AOHS <- list(
   id = "core_srh",
-  label = "[VERBATIM_REQUIRED \u2014 AOHS 2023] Overall, how would you describe the health of your mouth?",
+  label = "Overall, how would you describe the health of your mouth?",
   options = c("Very good", "Good", "Fair", "Bad", "Very bad"),
   source = "Adult Oral Health Survey 2023, single five-point item, OGL v3.0")
 
@@ -114,11 +114,11 @@ MDAS <- list(
   options = c("Not anxious", "Slightly anxious", "Fairly anxious",
               "Very anxious", "Extremely anxious"),
   items = list(
-    list(id = "mdas_1", label = "[VERBATIM_REQUIRED] If you were going to the dentist tomorrow, how would you feel?"),
-    list(id = "mdas_2", label = "[VERBATIM_REQUIRED] Waiting in the waiting room for your turn."),
-    list(id = "mdas_3", label = "[VERBATIM_REQUIRED] About to have a tooth drilled."),
-    list(id = "mdas_4", label = "[VERBATIM_REQUIRED] About to have your teeth scaled and polished."),
-    list(id = "mdas_5", label = "[VERBATIM_REQUIRED] About to have a local anaesthetic injection in your gum."))
+    list(id = "mdas_1", label = "If you were going to the dentist tomorrow, how would you feel?"),
+    list(id = "mdas_2", label = "Waiting in the waiting room for your turn."),
+    list(id = "mdas_3", label = "About to have a tooth drilled."),
+    list(id = "mdas_4", label = "About to have your teeth scaled and polished."),
+    list(id = "mdas_5", label = "About to have a local anaesthetic injection in your gum."))
 )
 
 mdas_score <- function(answers) {
