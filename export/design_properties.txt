@@ -1,0 +1,31 @@
+21D-BARRIERS-v2  |  app 0.3.0  |  exported 2026-08-26T14:33:06Z
+
+DCE
+  attributes         2 (rate, fee)
+  levels             rate: 6/9/12/15; fee: 0/250/750
+  profiles           12
+  non-dominated pairs 18 of 66
+  choice sets        12 (+1 dominance test)
+  search method      exhaustive over 18,564 candidate designs
+  criterion          effects-coded D-optimality
+  det(effects)       306000.0
+  det(linear)        157.6
+  rel. eff. linear   0.842
+  blocks             6 / 6
+  dual response      forced choice, then take-it; non-loan outcome recorded
+                     separately as pay privately or do not proceed
+
+BWS Case 1
+  items              7
+  sets               7 of 4 shown per set
+  appearances/item   4
+  pair co-occurrence 2 (balanced: TRUE)
+
+Randomisation to apply in the platform
+  Module order       50/50 BWS-first vs DCE-first; store the arm as a variable
+  DCE task order     randomised within respondent
+  DCE side           randomise which profile is shown as A
+  BWS set order      randomised within respondent
+  BWS item order     randomised within set
+
+Estimated burden    13:36

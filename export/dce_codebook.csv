@@ -1,0 +1,8 @@
+"attribute","label","level_index","level_value","unit","direction","display_text"
+"rate","Repayment rate",1,6,"% of earnings above the floor","lower_better","Repay 6% of earnings above £12,570"
+"rate","Repayment rate",2,9,"% of earnings above the floor","lower_better","Repay 9% of earnings above £12,570"
+"rate","Repayment rate",3,12,"% of earnings above the floor","lower_better","Repay 12% of earnings above £12,570"
+"rate","Repayment rate",4,15,"% of earnings above the floor","lower_better","Repay 15% of earnings above £12,570"
+"fee","Upfront fee",1,0,"GBP, one-off","lower_better","Upfront fee: £0"
+"fee","Upfront fee",2,250,"GBP, one-off","lower_better","Upfront fee: £250"
+"fee","Upfront fee",3,750,"GBP, one-off","lower_better","Upfront fee: £750"
