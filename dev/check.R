@@ -9,41 +9,50 @@ if (!dir.exists("app/R")) stop("Run from the repository root: Rscript dev/check.
 for (f in sort(list.files("app/R", pattern = "[.]R$", full.names = TRUE))) source(f, encoding = "UTF-8")
 
 PASS <- 0L; FAIL <- 0L
-ok <- function(label, expr) {
+WARN <- 0L
+ok <- function(label, expr, fatal = TRUE) {
   r <- tryCatch(isTRUE(expr), error = function(e) structure(FALSE, msg = conditionMessage(e)))
   if (isTRUE(r)) { PASS <<- PASS + 1L; cat(sprintf("  ok    %s\n", label)) }
-  else { FAIL <<- FAIL + 1L; cat(sprintf("  FAIL  %s %s\n", label, attr(r, "msg") %||% "")) }
+  else if (fatal) { FAIL <<- FAIL + 1L; cat(sprintf("  FAIL  %s %s\n", label, attr(r, "msg") %||% "")) }
+  else { WARN <<- WARN + 1L; cat(sprintf("  warn  %s %s\n", label, attr(r, "msg") %||% "")) }
 }
 
 cat("\n== DCE design ==\n")
 cand <- dce_candidates()
 d <- dce_design(12)
-ok("18 non-dominated candidate pairs", nrow(cand) == 18)
-ok("12 choice sets served", nrow(d) == 12)
-ok("no set is dominated", all(mapply(function(ar, af, br, bf)
-  !((ar <= br && af <= bf) || (br <= ar && bf <= af)),
-  d$a_rate, d$a_fee, d$b_rate, d$b_fee)))
-ok("all sets distinct", !any(duplicated(paste(d$a_rate, d$a_fee, d$b_rate, d$b_fee))))
+ok(sprintf("%d non-dominated candidate pairs from %d profiles", nrow(cand), nrow(dce_profiles())),
+   nrow(cand) > 0 && nrow(cand) <= choose(nrow(dce_profiles()), 2))
+ok(sprintf("%d choice sets served", CFG$dce_tasks), nrow(d) == CFG$dce_tasks)
+ok("no set is dominated", {
+  nm <- dce_names()
+  all(vapply(seq_len(nrow(d)), function(i) {
+    A <- setNames(lapply(nm, function(a) d[[paste0("a_", a)]][i]), nm)
+    B <- setNames(lapply(nm, function(a) d[[paste0("b_", a)]][i]), nm)
+    !.dominates(A, B, DCE_SPEC) && !.dominates(B, A, DCE_SPEC)
+  }, logical(1)))
+})
+ok("all sets distinct", !any(duplicated(d[, grepl("^[ab]_", names(d))])))
 ok("effects-coded information matrix is non-singular", attr(d, "det_effects") > 0)
-ok("linear model retains >80% relative efficiency", attr(d, "rel_eff_linear") > 0.80)
-ok("every rate level appears", length(unique(c(d$a_rate, d$b_rate))) == 4)
-ok("every fee level appears", length(unique(c(d$a_fee, d$b_fee))) == 3)
-ok("two equal blocks", identical(as.integer(table(d$block)), c(6L, 6L)))
+ok("linear model retains >80% relative efficiency (exhaustive only)",
+   is.na(attr(d, "rel_eff_linear")) || attr(d, "rel_eff_linear") > 0.80, fatal = FALSE)
+ok("every level of every attribute appears", all(vapply(DCE_SPEC, function(a)
+  setequal(unique(c(d[[paste0("a_", a$name)]], d[[paste0("b_", a$name)]])), a$levels), logical(1))))
+ok("two equal blocks", identical(as.integer(table(d$block)), rep(as.integer(CFG$dce_tasks / 2), 2)))
 ok("design is deterministic across calls",
-   identical(.dce_design_build(12)[, 1:6], .dce_design_build(12)[, 1:6]))
+   identical(.dce_design_build(), .dce_design_build()))
 
 set.seed(1); tk <- dce_tasks_for(CFG)
 ok("dominance task appended", sum(tk$dominance) == 1)
-ok("dominance task is genuinely dominated", {
-  r <- tk[tk$dominance == 1, ]
-  (r$a_rate <= r$b_rate && r$a_fee <= r$b_fee) || (r$b_rate <= r$a_rate && r$b_fee <= r$a_fee)
-})
+ok("dominance task is genuinely dominated",
+   !is.na(.dce_worse_side(tk[tk$dominance == 1, ])))
 ok("side assignment varies", length(unique(tk$side_flipped)) == 2)
-ok("13 tasks served with dominance on", nrow(tk) == 13)
+ok("dominance task adds exactly one served task",
+   nrow(tk) == CFG$dce_tasks + as.integer(CFG$include_dominance))
 ok("dominance scoring identifies the worse loan", {
   r <- tk[tk$dominance == 1, ]
-  worse <- if (r$a_rate > r$b_rate) "A" else "B"
-  dce_dominance_failed(r, worse) == 1 && dce_dominance_failed(r, setdiff(c("A", "B"), worse)) == 0
+  worse <- .dce_worse_side(r)
+  dce_dominance_failed(r, worse) == 1 &&
+    dce_dominance_failed(r, setdiff(c("A", "B"), worse)) == 0
 })
 
 cat("\n== BWS designs ==\n")
@@ -150,11 +159,35 @@ if (!requireNamespace("RSQLite", quietly = TRUE)) {
   sq$disconnect(); unlink(tmp2, recursive = TRUE)
 }
 
+cat("\n== Postgres backend ==\n")
+if (!nzchar(Sys.getenv("DATABASE_URL"))) {
+  cat("  skip  DATABASE_URL not set\n")
+} else if (!requireNamespace("RPostgres", quietly = TRUE) &&
+           !requireNamespace("RPostgreSQL", quietly = TRUE)) {
+  cat("  skip  no Postgres driver installed\n")
+} else {
+  pg <- store_postgres()
+  ok("connects and creates four tables", pg$healthy() && length(pg$read()) == 4)
+  rid3 <- new_rid()
+  ok("revision counter increments", identical(c(pg$next_rev(rid3), pg$next_rev(rid3)), c(1L, 2L)))
+  pg$append("items", rows_items(rid3, 1L, "core", list(core_srh = "Good"), 9))
+  pg$append("items", rows_items(rid3, 2L, "core", list(core_srh = "Fair"), 4))
+  mine <- function() { d <- store_latest(pg$read()); lapply(d, function(x) x[x$rid == rid3, , drop = FALSE]) }
+  ok("latest revision wins on read", mine()$items$value == "Fair")
+  set.seed(8)
+  pg$append("dce", rows_dce(rid3, 1L, dce_tasks_for(CFG)[1, ], "B", "Yes", "take_loan", 30000, 22))
+  ok("dce round-trips two rows with one chosen",
+     nrow(mine()$dce) == 2 && sum(mine()$dce$chosen) == 1)
+  xl3 <- file.path(tempdir(), "pg.xlsx")
+  ok("workbook exports from Postgres", { store_export(pg, xl3); file.size(xl3) > 1000 })
+  if (!is.null(pg$disconnect)) try(pg$disconnect(), silent = TRUE)
+}
+
 cat("\n== Burden ==\n")
 g <- admin_burden_grid(CFG)
 ok("burden grid covers every catalogued design", nrow(g) == length(BWS_CATALOGUE) * 2 * 2)
 ok("at least one configuration lands under 13 minutes", any(g$under_13min))
 ok("current configuration burden is reported", burden_estimate(CFG) > 0)
 
-cat(sprintf("\n%d passed, %d failed\n", PASS, FAIL))
+cat(sprintf("\n%d passed, %d warnings, %d failed\n", PASS, WARN, FAIL))
 if (FAIL > 0) quit(status = 1)

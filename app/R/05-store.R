@@ -43,7 +43,7 @@ store_schema <- function() list(
     set_id = character(), block = integer(), dominance = integer(), side_flipped = integer(),
     alt = character(), rate = numeric(), fee = numeric(), monthly = numeric(),
     chosen = integer(), stage2_take = character(), stage2_outcome = character(),
-    seconds = numeric(), stringsAsFactors = FALSE),
+    seconds = numeric(), attrs = character(), stringsAsFactors = FALSE),
   bws = data.frame(
     rid = character(), rev = integer(), ts_utc = character(), set_order = integer(),
     set_id = character(), position = integer(), item_id = character(),
@@ -192,8 +192,14 @@ store_dbi <- function(connect, label = "dbi") {
   if (!requireNamespace("DBI", quietly = TRUE))
     stop("store_dbi needs the DBI package: install.packages('DBI')")
   con <- NULL
+  # Liveness is tested with a trivial query rather than dbIsValid, because
+  # dbIsValid is not implemented by every DBI driver — RPostgreSQL throws on it
+  # outright — and a driver-specific check here would silently reconnect on
+  # every single call, or fail closed on a perfectly good connection.
+  alive <- function(cn) tryCatch({ DBI::dbGetQuery(cn, "select 1"); TRUE },
+                                 error = function(e) FALSE)
   live <- function() {
-    if (is.null(con) || !DBI::dbIsValid(con)) con <<- connect()
+    if (is.null(con) || !alive(con)) con <<- connect()
     con
   }
   # Retry once on failure: a dropped connection should cost a reconnect, not a
@@ -221,7 +227,12 @@ store_dbi <- function(connect, label = "dbi") {
       k <- paste0("r", rid)
       if (is.null(rev[[k]])) {
         rev[[k]] <- with_con(function(cn) {
-          r <- DBI::dbGetQuery(cn, "select max(rev) as m from respondents where rid = ?", list(rid))
+          # Placeholder syntax is not portable ("?" in SQLite, "$1" in
+          # Postgres, and RPostgreSQL binds neither), so the value is quoted by
+          # the driver and inlined instead.
+          q <- sprintf("select max(rev) as m from respondents where rid = %s",
+                       DBI::dbQuoteLiteral(cn, rid))
+          r <- DBI::dbGetQuery(cn, q)
           if (!nrow(r) || is.na(r$m[1])) 0L else as.integer(r$m[1])
         })
       }
@@ -230,14 +241,18 @@ store_dbi <- function(connect, label = "dbi") {
     },
     append = function(table, df) {
       if (!nrow(df)) return(invisible(TRUE))
-      with_con(function(cn) DBI::dbAppendTable(cn, table, as.data.frame(df)))
+      # dbWriteTable(append = TRUE) rather than dbAppendTable: the latter builds
+      # a parameterised INSERT with "?" placeholders, which RPostgreSQL cannot
+      # bind. dbWriteTable is implemented natively by every driver here.
+      with_con(function(cn)
+        DBI::dbWriteTable(cn, table, as.data.frame(df), append = TRUE, row.names = FALSE))
       invisible(TRUE)
     },
     read = function() with_con(function(cn)
       setNames(lapply(STORE_TABLES, function(t) DBI::dbReadTable(cn, t)), STORE_TABLES)),
     can_read = function() TRUE,
     disconnect = function() if (!is.null(con) && DBI::dbIsValid(con)) DBI::dbDisconnect(con),
-    healthy = function() tryCatch(with_con(DBI::dbIsValid), error = function(e) FALSE),
+    healthy = function() tryCatch(with_con(alive), error = function(e) FALSE),
     # Hot backup. VACUUM INTO takes a consistent snapshot of a database that is
     # being written to, so this is safe to run on a cron or Task Scheduler
     # during fielding. Copying the file with the OS is NOT safe: it can catch a
@@ -278,9 +293,32 @@ store_sqlite <- function(path = file.path(CFG$store_path, "responses.sqlite")) {
 # postgres://user:password@host:port/dbname form.
 store_postgres <- function(url = Sys.getenv("DATABASE_URL")) {
   if (!nzchar(url)) stop("store_postgres needs DATABASE_URL")
-  if (!requireNamespace("RPostgres", quietly = TRUE))
-    stop("store_postgres needs RPostgres: install.packages('RPostgres')")
-  store_dbi(function() DBI::dbConnect(RPostgres::Postgres(), dbname = url), label = "postgres")
+  if (requireNamespace("RPostgres", quietly = TRUE))
+    return(store_dbi(function() DBI::dbConnect(RPostgres::Postgres(), dbname = url),
+                     label = "postgres"))
+  # Fallback driver. RPostgres is preferred (better type handling, faster), but
+  # RPostgreSQL ships as a distro package on some hosts where RPostgres will not
+  # build, so accept either rather than failing at deployment.
+  if (requireNamespace("RPostgreSQL", quietly = TRUE)) {
+    p <- .parse_pg_url(url)
+    return(store_dbi(function() DBI::dbConnect(RPostgreSQL::PostgreSQL(),
+      host = p$host, port = p$port, dbname = p$dbname, user = p$user, password = p$password),
+      label = "postgres"))
+  }
+  stop("store_postgres needs RPostgres or RPostgreSQL: install.packages('RPostgres')")
+}
+
+# postgres://user:password@host:port/dbname[?params]
+.parse_pg_url <- function(url) {
+  u <- sub("^postgres(ql)?://", "", url)
+  u <- sub("[?].*$", "", u)
+  cred <- if (grepl("@", u)) sub("@.*$", "", u) else ""
+  rest <- sub("^.*@", "", u)
+  list(user = utils::URLdecode(sub(":.*$", "", cred)),
+       password = utils::URLdecode(if (grepl(":", cred)) sub("^[^:]*:", "", cred) else ""),
+       host = sub("[:/].*$", "", rest),
+       port = as.integer(if (grepl(":", rest)) sub("^[^:]*:([0-9]+).*$", "\\1", rest) else "5432"),
+       dbname = sub("^.*/", "", rest))
 }
 
 # --- Factory ---------------------------------------------------------------
@@ -337,15 +375,32 @@ rows_items <- function(rid, rev, module, answers, seconds = NA_real_) {
 }
 
 rows_dce <- function(rid, rev, row, choice, take, outcome, income, seconds) {
-  data.frame(
+  nm <- dce_names()
+  attrs <- lapply(nm, function(a) c(row[[paste0("a_", a)]], row[[paste0("b_", a)]]))
+  names(attrs) <- nm
+  base <- data.frame(
     rid = rid, rev = rev, ts_utc = now_utc(), task_order = as.integer(row$task_order),
     set_id = row$set_id, block = as.integer(row$block), dominance = as.integer(row$dominance),
     side_flipped = as.integer(row$side_flipped), alt = c("A", "B"),
-    rate = c(row$a_rate, row$b_rate), fee = c(row$a_fee, row$b_fee),
-    monthly = c(monthly_repay(row$a_rate, income), monthly_repay(row$b_rate, income)),
-    chosen = as.integer(c(choice == "A", choice == "B")),
-    stage2_take = take %||% NA_character_, stage2_outcome = outcome %||% NA_character_,
-    seconds = seconds, row.names = NULL, stringsAsFactors = FALSE)
+    stringsAsFactors = FALSE)
+  # Attribute columns are named from the spec. The fixed schema carries `rate`
+  # and `fee`; a spec with more attributes writes them to attrs_json so the
+  # store shape does not have to change every time the design does.
+  base$rate <- if ("rate" %in% nm) attrs$rate else NA_real_
+  base$fee  <- if ("fee"  %in% nm) attrs$fee  else NA_real_
+  base$monthly <- if ("rate" %in% nm)
+    vapply(attrs$rate, monthly_repay, numeric(1), income = income) else NA_real_
+  base$chosen <- as.integer(c(choice == "A", choice == "B"))
+  base$stage2_take <- take %||% NA_character_
+  base$stage2_outcome <- outcome %||% NA_character_
+  base$seconds <- seconds
+  # "rate=6;fee=250" rather than JSON: no quotes or commas, so it survives CSV
+  # round-tripping without escaping, and splits on ";" and "=" in one line.
+  base$attrs <- vapply(1:2, function(k)
+    paste(sprintf("%s=%s", nm, vapply(nm, function(a) as.character(attrs[[a]][k]), "")),
+          collapse = ";"), character(1))
+  rownames(base) <- NULL
+  base
 }
 
 rows_bws <- function(rid, rev, set, best_item, worst_item, seconds) {

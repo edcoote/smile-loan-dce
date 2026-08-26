@@ -1,212 +1,320 @@
 # 02-design-dce.R -----------------------------------------------------------
 # Smile Loan DCE — dual-response, unlabelled paired design.
 #
-# Attributes (threshold FIXED at the £12,570 personal allowance, not varied):
-#   rate : 6, 9, 12, 15  (% of earnings above the floor)
-#   fee  : 0, 250, 750   (£ one-off upfront)
+# SINGLE SOURCE OF TRUTH
+# Everything about the experiment is declared in DCE_SPEC below: the attributes,
+# their levels, whether they are ordered, and how each level is shown to a
+# respondent. Profiles, coding matrices, dominance filtering, the efficient
+# design search, the respondent-facing cards and the platform export are all
+# DERIVED from it. Adding, removing or re-levelling an attribute means editing
+# DCE_SPEC and nothing else — no export code, no UI code, no test code.
 #
-# Stage 1 : forced choice, Loan A vs Loan B.
-# Stage 2 : "would you actually take it?" -> yes / no; if no, the non-loan
-#           outcome is recorded as *pay privately* or *do not proceed*,
-#           never collapsed into a single opt-out.
+# The one thing that is not derived is respondent-facing wording, which lives in
+# each attribute's `render` function. That is deliberate: auto-generated text
+# ("fee: 250") is exactly the kind of thing that quietly damages validity, so
+# wording stays explicit and hand-written, just co-located with the attribute it
+# describes.
 #
-# Design construction. The 4x3 factorial gives 12 profiles and C(12,2)=66
-# unordered pairs. A pair is dominated when one profile is weakly cheaper on
-# both attributes; those carry no trade-off information in stage 1. Removing
-# them leaves exactly 18 candidate pairs (4C2 rate contrasts x 3C2 fee
-# contrasts). Choosing 12 of 18 is C(18,12) = 18,564 designs, so the D-optimal
-# design is found by complete enumeration, not by a heuristic search. It is
-# therefore exact and reproducible without a seed.
-#
-# Under the standard null prior (beta = 0) both alternatives in a binary set
-# carry p = 0.5, and the MNL information matrix collapses to
-#       I(beta=0) = 0.25 * sum_s d_s d_s'      with d_s = x_A - x_B
-# so D-optimality is maximisation of det(sum_s d_s d_s'). This is exact for the
-# linear-in-attributes specification used for the primary WTP model; the
-# effects-coded D-error is reported alongside as a robustness figure.
+# DUAL RESPONSE
+#   Stage 1  forced choice, Loan A vs Loan B.
+#   Stage 2  "would you actually take it?" -> yes / no; if no, the non-loan
+#            outcome is recorded as *pay privately* or *do not proceed*, never
+#            collapsed into a single opt-out.
 # ---------------------------------------------------------------------------
 
-DCE_LEVELS <- list(rate = c(6, 9, 12, 15), fee = c(0, 250, 750))
+# --- THE SPEC --------------------------------------------------------------
+# name      column name used everywhere downstream (stored, exported, modelled)
+# label     short human name for codebooks and exports
+# levels    the levels, in their natural order
+# monotone  "lower_better" | "higher_better" | NA (unordered)
+#           Only monotone attributes participate in dominance filtering.
+# unit      free text for the codebook
+# render    function(level) -> HTML string shown inside a loan card
+DCE_SPEC <- list(
+  list(name = "rate", label = "Repayment rate", levels = c(6, 9, 12, 15),
+       monotone = "lower_better", unit = "% of earnings above the floor",
+       render = function(x) sprintf("Repay <b>%s%%</b> of earnings above \u00A312,570", x)),
+  list(name = "fee", label = "Upfront fee", levels = c(0, 250, 750),
+       monotone = "lower_better", unit = "GBP, one-off",
+       render = function(x) sprintf("Upfront fee: <b>%s</b>", fmt_gbp(x)))
+)
 
-# All 12 profiles.
-dce_profiles <- function() {
-  d <- expand.grid(fee = DCE_LEVELS$fee, rate = DCE_LEVELS$rate)
-  d <- data.frame(rate = d$rate, fee = d$fee)
-  d$pid <- sprintf("P%02d", seq_len(nrow(d)))
-  d[, c("pid", "rate", "fee")]
+# Everything below is generic over DCE_SPEC.
+dce_names  <- function(spec = DCE_SPEC) vapply(spec, `[[`, "", "name")
+dce_levels <- function(spec = DCE_SPEC) setNames(lapply(spec, `[[`, "levels"), dce_names(spec))
+
+# --- Profiles --------------------------------------------------------------
+dce_profiles <- function(spec = DCE_SPEC) {
+  g <- expand.grid(rev(dce_levels(spec)), stringsAsFactors = FALSE)
+  g <- g[, rev(seq_len(ncol(g))), drop = FALSE]
+  names(g) <- dce_names(spec)
+  g$pid <- sprintf("P%02d", seq_len(nrow(g)))
+  g[, c("pid", dce_names(spec)), drop = FALSE]
 }
 
-# Linear coding used for the primary model: rate in points, fee in £100s,
-# both centred so the difference vector is scale-comparable.
-dce_x_linear <- function(p) cbind(rate = (p$rate - 10.5) / 3, fee = (p$fee - 250) / 100)
+# --- Coding ----------------------------------------------------------------
+# Linear: monotone numeric attributes only, centred and scaled so difference
+# vectors are comparable across attributes of different magnitudes.
+dce_x_linear <- function(p, spec = DCE_SPEC) {
+  keep <- vapply(spec, function(a) !is.na(a$monotone) && is.numeric(a$levels), logical(1))
+  if (!any(keep)) stop("No monotone numeric attributes: the linear coding is undefined.")
+  m <- vapply(spec[keep], function(a) {
+    v <- p[[a$name]]; lv <- a$levels
+    (v - mean(range(lv))) / (diff(range(lv)) / 2)
+  }, numeric(nrow(p)))
+  colnames(m) <- dce_names(spec)[keep]
+  m
+}
 
-# Effects coding for the robustness check: 3 df for rate, 2 df for fee.
-dce_x_effects <- function(p) {
-  ec <- function(v, lv) {
-    m <- matrix(0, length(v), length(lv) - 1)
+# Effects coding: every attribute, nlev - 1 columns each.
+dce_x_effects <- function(p, spec = DCE_SPEC) {
+  blocks <- lapply(spec, function(a) {
+    lv <- a$levels; v <- p[[a$name]]
+    m <- matrix(0, length(v), length(lv) - 1,
+                dimnames = list(NULL, paste0(a$name, "_", lv[-length(lv)])))
     for (i in seq_along(v)) {
       k <- match(v[i], lv)
       if (k < length(lv)) m[i, k] <- 1 else m[i, ] <- -1
     }
     m
-  }
-  cbind(ec(p$rate, DCE_LEVELS$rate), ec(p$fee, DCE_LEVELS$fee))
+  })
+  do.call(cbind, blocks)
 }
 
-# Candidate pairs that are not dominated: A strictly better on rate,
-# strictly worse on fee (or vice versa — order is fixed later at random).
-dce_candidates <- function() {
-  p <- dce_profiles()
-  out <- NULL
-  for (i in seq_len(nrow(p))) for (j in seq_len(nrow(p))) {
-    if (i >= j) next
-    lo_rate <- p$rate[i] < p$rate[j]; hi_fee <- p$fee[i] > p$fee[j]
-    if ((lo_rate && hi_fee) || (!lo_rate && p$rate[i] > p$rate[j] && p$fee[i] < p$fee[j]))
-      out <- rbind(out, data.frame(a = i, b = j))
+# --- Dominance -------------------------------------------------------------
+# A pair is dominated when one profile is weakly better on every MONOTONE
+# attribute and strictly better on at least one, with all unordered attributes
+# equal. Unordered attributes cannot make a profile better or worse, so a pair
+# differing on one is never dominated.
+.dominates <- function(a, b, spec) {
+  mono <- Filter(function(x) !is.na(x$monotone), spec)
+  unord <- Filter(function(x) is.na(x$monotone), spec)
+  for (x in unord) if (!identical(a[[x$name]], b[[x$name]])) return(FALSE)
+  strict <- FALSE
+  for (x in mono) {
+    av <- a[[x$name]]; bv <- b[[x$name]]
+    better <- if (identical(x$monotone, "lower_better")) av <= bv else av >= bv
+    if (!better) return(FALSE)
+    if (av != bv) strict <- TRUE
   }
-  out
+  strict
 }
 
-# det(sum d d') for a subset of candidate pairs, given a coding function.
+dce_candidates <- function(spec = DCE_SPEC) {
+  p <- dce_profiles(spec)
+  n <- nrow(p)
+  out <- vector("list", 0)
+  for (i in seq_len(n - 1)) for (j in (i + 1):n) {
+    if (.dominates(p[i, ], p[j, ], spec) || .dominates(p[j, ], p[i, ], spec)) next
+    out[[length(out) + 1]] <- c(i, j)
+  }
+  if (!length(out)) stop("No non-dominated pairs: check the attribute monotonicity flags.")
+  do.call(rbind, lapply(out, function(z) data.frame(a = z[1], b = z[2])))
+}
+
+# --- Efficiency criterion --------------------------------------------------
+# At beta = 0 both alternatives carry p = 0.5, so the MNL information matrix
+# collapses to 0.25 * sum_s d_s d_s' with d_s = x_A - x_B, and D-optimality is
+# maximisation of det(sum_s d_s d_s').
 .d_criterion <- function(idx, cand, Xm) {
   D <- Xm[cand$a[idx], , drop = FALSE] - Xm[cand$b[idx], , drop = FALSE]
   det(crossprod(D))
 }
 
-# Attribute-level imbalance: summed variance of level appearance counts.
-# Zero would be perfect balance; the non-dominated candidate set makes perfect
-# balance unreachable here, so this is used only to break ties.
-.level_imbalance <- function(idx, cand, p) {
+.level_imbalance <- function(idx, cand, p, spec) {
   d <- cand[idx, ]
-  r <- table(factor(c(p$rate[d$a], p$rate[d$b]), levels = DCE_LEVELS$rate))
-  f <- table(factor(c(p$fee[d$a],  p$fee[d$b]),  levels = DCE_LEVELS$fee))
-  stats::var(as.numeric(r)) + stats::var(as.numeric(f))
+  sum(vapply(spec, function(a) {
+    v <- c(p[[a$name]][d$a], p[[a$name]][d$b])
+    stats::var(as.numeric(table(factor(v, levels = a$levels))))
+  }, numeric(1)))
 }
 
-# Complete enumeration of C(18, n) subsets.
-#
-# Primary criterion is the EFFECTS-coded D-criterion, not the linear one.
-# Rate is carried at four levels precisely so that curvature in the repayment
-# rate can be tested; a linear-optimal design loads on the extreme levels and
-# leaves the interior levels thin (7/5/5/7 across 6/9/12/15). The effects-
-# optimal design gives 7/6/6/5 and a 48% larger effects-coded determinant, at
-# the cost of ~16% relative efficiency for the linear WTP model. That is the
-# right side of the trade when non-linearity is a stated estimand.
-#
-# Ties on the effects criterion (there are four) are broken first on level
-# balance, then on the linear criterion — so the served design is the most
-# balanced, most linear-efficient member of the effects-optimal set, and is
-# fully determined without a random seed.
-dce_optimal <- function(n = 12, criterion = c("effects", "linear"), verbose = FALSE) {
+# Random-swap search, used when the candidate space is too large to enumerate.
+# Multi-start, deterministic given the seed, so the served design is still
+# reproducible from the repository alone.
+.dce_swap <- function(n, cand, Xm, starts = 40, seed = 20260826) {
+  set.seed(seed)
+  N <- nrow(cand); best <- NULL; bestv <- -Inf
+  for (s in seq_len(starts)) {
+    idx <- sample(N, n)
+    cur <- .d_criterion(idx, cand, Xm)
+    repeat {
+      improved <- FALSE
+      for (pos in seq_len(n)) {
+        for (repl in setdiff(seq_len(N), idx)) {
+          trial <- idx; trial[pos] <- repl
+          v <- .d_criterion(trial, cand, Xm)
+          if (v > cur + 1e-12) { idx <- trial; cur <- v; improved <- TRUE }
+        }
+      }
+      if (!improved) break
+    }
+    if (cur > bestv) { bestv <- cur; best <- idx }
+  }
+  best
+}
+
+# Chooses exhaustive enumeration when it is affordable and swapping when it is
+# not, and records which was used so the method section can state it.
+DCE_ENUM_LIMIT <- 2e5
+
+dce_optimal <- function(n = CFG$dce_tasks, spec = DCE_SPEC,
+                        criterion = c("effects", "linear"), verbose = FALSE) {
   criterion <- match.arg(criterion)
-  p    <- dce_profiles()
-  cand <- dce_candidates()
-  XL   <- dce_x_linear(p)
-  XE   <- dce_x_effects(p)
-  combos <- utils::combn(nrow(cand), n)
-  cl <- apply(combos, 2, .d_criterion, cand = cand, Xm = XL)
-  ce <- apply(combos, 2, .d_criterion, cand = cand, Xm = XE)
-  primary <- if (criterion == "effects") ce else cl
-  ties <- which(primary > max(primary) - 1e-9)
-  bal  <- vapply(ties, function(k) .level_imbalance(combos[, k], cand, p), numeric(1))
-  sec  <- if (criterion == "effects") cl[ties] else ce[ties]
-  k    <- ties[order(bal, -sec)][1]
-  best <- combos[, k]
+  p    <- dce_profiles(spec)
+  cand <- dce_candidates(spec)
+  XE   <- dce_x_effects(p, spec)
+  XL   <- tryCatch(dce_x_linear(p, spec), error = function(e) NULL)
+  Xp   <- if (criterion == "effects") XE else XL
+  if (is.null(Xp)) stop("Requested criterion is unavailable for this spec.")
+  if (n > nrow(cand)) stop("Asked for ", n, " sets but only ", nrow(cand),
+                           " non-dominated pairs exist.")
+
+  nsub <- tryCatch(choose(nrow(cand), n), error = function(e) Inf)
+  method <- if (is.finite(nsub) && nsub <= DCE_ENUM_LIMIT) "exhaustive" else "swap"
+
+  if (method == "exhaustive") {
+    combos <- utils::combn(nrow(cand), n)
+    pv <- apply(combos, 2, .d_criterion, cand = cand, Xm = Xp)
+    ties <- which(pv > max(pv) - 1e-9)
+    bal <- vapply(ties, function(k) .level_imbalance(combos[, k], cand, p, spec), numeric(1))
+    sec <- if (!is.null(XL)) vapply(ties, function(k) .d_criterion(combos[, k], cand, XL), numeric(1))
+           else rep(0, length(ties))
+    k <- ties[order(bal, -sec)][1]
+    best <- combos[, k]; nties <- length(ties)
+    rel <- if (!is.null(XL)) (.d_criterion(best, cand, XL) / max(sec, .d_criterion(best, cand, XL)))^(1 / ncol(XL)) else NA_real_
+    lin_max <- if (!is.null(XL)) max(apply(combos, 2, .d_criterion, cand = cand, Xm = XL)) else NA_real_
+  } else {
+    best <- .dce_swap(n, cand, Xp); nties <- NA_integer_; lin_max <- NA_real_
+  }
+
+  dl <- if (!is.null(XL)) .d_criterion(best, cand, XL) else NA_real_
+  de <- .d_criterion(best, cand, XE)
   if (verbose)
-    cat(sprintf("candidates=%d  subsets=%d  ties=%d  det(effects)=%.1f  det(linear)=%.1f  imbalance=%.3f\n",
-                nrow(cand), ncol(combos), length(ties), ce[k], cl[k], bal[order(bal, -sec)][1]))
-  structure(cand[best, ], n_candidates = nrow(cand), n_subsets = ncol(combos),
-            criterion = criterion, n_ties = length(ties),
-            det_linear = cl[k], det_effects = ce[k],
-            rel_eff_linear = (cl[k] / max(cl))^(1 / ncol(XL)),
-            imbalance = bal[order(bal, -sec)][1])
+    cat(sprintf("method=%s candidates=%d subsets=%s det(effects)=%.1f det(linear)=%.1f\n",
+                method, nrow(cand), format(nsub, big.mark = ","), de, dl))
+
+  # Relative efficiency of the served design for the LINEAR model, against the
+  # best linear design available. Only computable when the space was enumerated;
+  # NA under swapping, where no global maximum is known.
+  rel_lin <- if (!is.na(lin_max) && !is.na(dl) && lin_max > 0)
+    (dl / lin_max)^(1 / ncol(XL)) else NA_real_
+  structure(cand[best, ], method = method, n_candidates = nrow(cand),
+            n_subsets = nsub, criterion = criterion, n_ties = nties,
+            det_linear = dl, det_effects = de, rel_eff_linear = rel_lin,
+            imbalance = .level_imbalance(best, cand, p, spec))
 }
 
-# The enumeration is deterministic, so it is computed once per process and
-# cached. Without this every respondent pays ~0.3s at the first DCE page.
+# --- Served design ---------------------------------------------------------
 .DESIGN_CACHE <- new.env(parent = emptyenv())
 
-# The served design: one row per choice set, both profiles side by side.
-dce_design <- function(n = 12) {
-  key <- paste0("d", n)
+dce_design <- function(n = CFG$dce_tasks, spec = DCE_SPEC) {
+  key <- paste0("d", n, "_", length(spec), "_", paste(dce_names(spec), collapse = "."))
   if (!is.null(.DESIGN_CACHE[[key]])) return(.DESIGN_CACHE[[key]])
-  .DESIGN_CACHE[[key]] <- .dce_design_build(n)
+  .DESIGN_CACHE[[key]] <- .dce_design_build(n, spec)
   .DESIGN_CACHE[[key]]
 }
 
-.dce_design_build <- function(n = 12) {
-  p    <- dce_profiles()
-  sel  <- dce_optimal(n)
-  d <- data.frame(
-    set_id  = sprintf("S%02d", seq_len(nrow(sel))),
-    a_rate  = p$rate[sel$a], a_fee = p$fee[sel$a],
-    b_rate  = p$rate[sel$b], b_fee = p$fee[sel$b],
-    dominance = 0L, stringsAsFactors = FALSE)
-  d$block <- dce_blocks(d)
-  for (a in c("det_linear", "det_effects", "rel_eff_linear", "imbalance",
-              "criterion", "n_candidates", "n_subsets", "n_ties"))
-    attr(d, a) <- attr(sel, a)
+.dce_design_build <- function(n = CFG$dce_tasks, spec = DCE_SPEC) {
+  p   <- dce_profiles(spec)
+  sel <- dce_optimal(n, spec)
+  nm  <- dce_names(spec)
+  d <- data.frame(set_id = sprintf("S%02d", seq_len(nrow(sel))), stringsAsFactors = FALSE)
+  for (a in nm) {
+    d[[paste0("a_", a)]] <- p[[a]][sel$a]
+    d[[paste0("b_", a)]] <- p[[a]][sel$b]
+  }
+  d$dominance <- 0L
+  d$block <- dce_blocks(d, spec = spec)
+  for (at in c("method", "det_linear", "det_effects", "rel_eff_linear", "imbalance",
+               "criterion", "n_candidates", "n_subsets", "n_ties"))
+    attr(d, at) <- attr(sel, at)
   d
 }
 
-# One-line design summary for the audit record and the admin panel.
-dce_design_summary <- function(d = dce_design(12)) {
-  sprintf("%d sets from %d non-dominated pairs (%d enumerated); criterion=%s; det_eff=%.0f; det_lin=%.0f; rel_eff_linear=%.3f",
-          nrow(d), attr(d, "n_candidates"), attr(d, "n_subsets"), attr(d, "criterion"),
-          attr(d, "det_effects"), attr(d, "det_linear"), attr(d, "rel_eff_linear"))
+dce_design_summary <- function(d = dce_design()) {
+  sprintf("%d sets over %d attributes; %d non-dominated pairs; method=%s; criterion=%s; det_eff=%.0f; det_lin=%.0f",
+          nrow(d), length(DCE_SPEC), attr(d, "n_candidates"), attr(d, "method"),
+          attr(d, "criterion"), attr(d, "det_effects"), attr(d, "det_linear"))
 }
 
-# The dominance test: a pair where one loan is cheaper on both attributes.
-# Reported as a data-quality indicator; never used to exclude a respondent.
-dce_dominance_task <- function() {
-  data.frame(set_id = "SDOM", a_rate = 6, a_fee = 0, b_rate = 15, b_fee = 750,
-             dominance = 1L, block = NA_integer_, stringsAsFactors = FALSE)
+# The dominance test: one profile better on every monotone attribute. Reported
+# as a data-quality indicator, never used to exclude.
+dce_dominance_task <- function(spec = DCE_SPEC) {
+  best <- worst <- list()
+  for (a in spec) {
+    lv <- a$levels
+    if (is.na(a$monotone)) { best[[a$name]] <- lv[1]; worst[[a$name]] <- lv[1] }
+    else if (identical(a$monotone, "lower_better")) {
+      best[[a$name]] <- min(lv); worst[[a$name]] <- max(lv)
+    } else { best[[a$name]] <- max(lv); worst[[a$name]] <- min(lv) }
+  }
+  d <- data.frame(set_id = "SDOM", stringsAsFactors = FALSE)
+  for (a in dce_names(spec)) {
+    d[[paste0("a_", a)]] <- best[[a]]; d[[paste0("b_", a)]] <- worst[[a]]
+  }
+  d$dominance <- 1L; d$block <- NA_integer_
+  d
 }
 
-# Split the design into two balanced blocks of equal size, chosen to maximise
-# the *minimum* D-criterion across blocks (maximin, not average) so that a
-# blocked fielding does not leave one arm materially weaker than the other.
-# C(12,6)/2 = 462 splits: enumerated exactly.
-dce_blocks <- function(d, n_blocks = 2) {
+# Which side is strictly worse in a dominance task?
+.dce_worse_side <- function(row, spec = DCE_SPEC) {
+  a <- setNames(lapply(dce_names(spec), function(n) row[[paste0("a_", n)]]), dce_names(spec))
+  b <- setNames(lapply(dce_names(spec), function(n) row[[paste0("b_", n)]]), dce_names(spec))
+  if (.dominates(a, b, spec)) "B" else if (.dominates(b, a, spec)) "A" else NA_character_
+}
+
+dce_dominance_failed <- function(row, choice, spec = DCE_SPEC) {
+  if (row$dominance != 1L) return(NA_integer_)
+  w <- .dce_worse_side(row, spec)
+  if (is.na(w)) return(NA_integer_)
+  as.integer(choice == w)
+}
+
+# Two equal blocks, maximin on the D-criterion so a blocked fielding does not
+# leave one arm materially weaker.
+dce_blocks <- function(d, n_blocks = 2, spec = DCE_SPEC) {
   n <- nrow(d)
-  if (n_blocks != 2 || n %% 2 != 0) return(rep(1L, n))
-  p <- dce_profiles()
-  X <- dce_x_linear(p)
-  key <- function(rate, fee) match(paste(rate, fee), paste(p$rate, p$fee))
-  ia <- key(d$a_rate, d$a_fee); ib <- key(d$b_rate, d$b_fee)
+  if (n_blocks != 2 || n %% 2 != 0 || n > 24) return(rep(1L, n))
+  p <- dce_profiles(spec); nm <- dce_names(spec)
+  X <- tryCatch(dce_x_linear(p, spec), error = function(e) dce_x_effects(p, spec))
+  key <- function(pref) {
+    vals <- do.call(paste, lapply(nm, function(a) d[[paste0(pref, "_", a)]]))
+    match(vals, do.call(paste, lapply(nm, function(a) p[[a]])))
+  }
+  ia <- key("a"); ib <- key("b")
   crit <- function(idx) { D <- X[ia[idx], , drop = FALSE] - X[ib[idx], , drop = FALSE]; det(crossprod(D)) }
   combos <- utils::combn(n, n / 2)
-  combos <- combos[, combos[1, ] == 1, drop = FALSE]   # de-duplicate mirror splits
+  combos <- combos[, combos[1, ] == 1, drop = FALSE]
   score <- apply(combos, 2, function(k) min(crit(k), crit(setdiff(seq_len(n), k))))
-  best <- combos[, which.max(score)]
-  out <- rep(2L, n); out[best] <- 1L
+  out <- rep(2L, n); out[combos[, which.max(score)]] <- 1L
   out
 }
 
-# Respondent-level task list: block filter, random task order, random A/B side
-# assignment (so position is not confounded with terms), dominance task placed
-# at a random interior position.
-dce_tasks_for <- function(cfg = CFG) {
-  d <- dce_design(12)
+# --- Respondent-level task list -------------------------------------------
+dce_tasks_for <- function(cfg = CFG, spec = DCE_SPEC) {
+  d <- dce_design(cfg$dce_tasks, spec)
   if (!is.na(cfg$dce_block)) d <- d[d$block == cfg$dce_block, ]
-  if (cfg$dce_tasks < nrow(d)) d <- d[seq_len(cfg$dce_tasks), ]
   d <- d[sample(nrow(d)), ]
   if (isTRUE(cfg$include_dominance)) {
-    pos <- sample(2:(nrow(d)), 1)
-    d <- rbind(d[seq_len(pos - 1), ], dce_dominance_task(), d[pos:nrow(d), ])
+    pos <- sample(2:nrow(d), 1)
+    d <- rbind(d[seq_len(pos - 1), ], dce_dominance_task(spec), d[pos:nrow(d), ])
   }
+  # Random side assignment so position is not confounded with terms.
   flip <- sample(c(TRUE, FALSE), nrow(d), TRUE)
-  sw <- d[flip, ]
-  d[flip, c("a_rate", "a_fee", "b_rate", "b_fee")] <- sw[, c("b_rate", "b_fee", "a_rate", "a_fee")]
+  nm <- dce_names(spec)
+  for (a in nm) {
+    ac <- paste0("a_", a); bc <- paste0("b_", a)
+    tmp <- d[flip, ac]; d[flip, ac] <- d[flip, bc]; d[flip, bc] <- tmp
+  }
   d$side_flipped <- as.integer(flip)
   d$task_order <- seq_len(nrow(d))
   rownames(d) <- NULL
   d
 }
 
-# Did the respondent fail the dominance test? (chose the strictly worse loan)
-dce_dominance_failed <- function(row, choice) {
-  if (row$dominance != 1L) return(NA_integer_)
-  worse <- if (row$a_rate > row$b_rate) "A" else "B"
-  as.integer(choice == worse)
+# --- Respondent-facing rendering ------------------------------------------
+# Returns the HTML lines for one alternative, in spec order.
+dce_render_alt <- function(row, side, spec = DCE_SPEC) {
+  vapply(spec, function(a) a$render(row[[paste0(side, "_", a$name)]]), character(1))
 }

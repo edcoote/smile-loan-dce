@@ -100,23 +100,24 @@ render_page <- function(page, i, rv) {
 
     dce = {
       r <- page$row
-      alt_card <- function(nm, rate, fee) {
-        mo <- monthly_repay(rate, rv$income)
-        div(class = "alt",
-          h4(nm),
-          p(HTML(sprintf("Repay <b>%s%%</b> of earnings above \u00A312,570", rate))),
-          p(HTML(sprintf("Upfront fee: <b>%s</b>", fmt_gbp(fee)))),
+      # Card contents come from DCE_SPEC$render, so adding an attribute adds a
+      # line here automatically and no layout code changes.
+      alt_card <- function(nm, side) {
+        lines <- dce_render_alt(r, side)
+        mono <- if ("rate" %in% dce_names())
           div(class = "muted",
               if (rv$income <= FLOOR) "At your income, no repayments would be due."
-              else sprintf("\u2248 %s a month at your income", fmt_gbp(mo))))
+              else sprintf("\u2248 %s a month at your income",
+                           fmt_gbp(monthly_repay(r[[paste0(side, "_rate")]], rv$income))))
+        div(class = "alt", h4(nm), lapply(lines, function(x) p(HTML(x))), mono)
       }
       tagList(
         progress_bar(flow_progress(rv$flow, i)),
         span(class = "prog", sprintf("Pair %d of %d", r$task_order, page$n)),
         h3("Which would you prefer?"),
         div(class = "grid2",
-            div(alt_card("LOAN A", r$a_rate, r$a_fee)),
-            div(alt_card("LOAN B", r$b_rate, r$b_fee))),
+            div(alt_card("LOAN A", "a")),
+            div(alt_card("LOAN B", "b"))),
         br(),
         radioButtons(pid(i, "choice"), "Between these two, which do you prefer?",
                      choices = c("Loan A" = "A", "Loan B" = "B"), selected = character(0), inline = TRUE),

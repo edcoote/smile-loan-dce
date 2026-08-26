@@ -3,3 +3,5 @@ dev/sim-data/
 *.xlsx
 .Rproj.user
 .Rhistory
+analysis/data/
+analysis/output/

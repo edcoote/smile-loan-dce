@@ -14,7 +14,10 @@ FLOOR <- 12570   # income-tax personal allowance. Repayment floor: FIXED, not an
 # here (or via URL query string) and the flow, the burden estimate and the
 # stored design metadata all follow. Nothing else needs editing.
 CFG <- list(
-  bws_items         = 13,     # 7 | 9 | 11 | 13 — each is a balanced BIBD, see 03-design-bws.R
+  # 7 | 9 | 11 | 13 — each is a balanced BIBD, see 03-design-bws.R.
+  # Burden is NOT monotone in item count: 11 items (11 sets of 5) costs 4:24,
+  # while 9 items (12 sets of 3) costs 4:48. Nine is dominated — never pick it.
+  bws_items         = 7,
   dce_tasks         = 12,     # 12 = full D-optimal set. 6 = one balanced block (see 02-design-dce.R)
   dce_block         = NA,     # NA = use all tasks; 1 or 2 = serve that block only
   split_sample      = FALSE,  # TRUE = each respondent gets BWS *or* DCE, not both (50/50)

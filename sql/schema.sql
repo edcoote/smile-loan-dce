@@ -82,7 +82,11 @@ create table if not exists survey.dce (
   -- never collapsed into a single opt-out indicator.
   stage2_take    text        check (stage2_take in ('Yes','No')),
   stage2_outcome text        check (stage2_outcome in ('take_loan','pay_privately','do_not_proceed')),
-  seconds        numeric
+  seconds        numeric,
+  -- Full attribute vector as "name=value;name=value", written from DCE_SPEC.
+  -- rate and fee above are kept as first-class columns for the current design;
+  -- this carries any additional attributes without a schema migration.
+  attrs          text
 );
 
 create table if not exists survey.bws (

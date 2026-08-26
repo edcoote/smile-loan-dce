@@ -152,9 +152,18 @@ ENABLING <- list(
 
 # --- Section 3: BWS barrier items -----------------------------------------
 # PLACEHOLDER. The real list comes from the qualitative phase (8-12
-# semi-structured interviews, thematic analysis to saturation). Thirteen items
-# are carried here to match the (13,4,1) design; cut to 11, 9 or 7 to move to a
-# smaller balanced design (see 03-design-bws.R).
+# semi-structured interviews, thematic analysis to saturation).
+#
+# CFG$bws_items is currently 7, so ONLY THE FIRST SEVEN ITEMS BELOW ARE SERVED.
+# The remainder are retained as a drafting pool and are invisible to
+# respondents. dev/lock-check.R flags the mismatch, because shipping a bank
+# longer than the design silently drops whatever sits below the cut.
+#
+# A seven-item BWS estimates relative importance among the seven included
+# barriers only. Anything excluded is not ranked low — it is absent, and no
+# analysis can recover it. The free-text item at the end is the only route back
+# for a barrier that did not make the cut, so it should be read, not just
+# archived.
 BWS_ITEMS <- data.frame(
   item_id = sprintf("bws_%02d", 1:13),
   label = c(
