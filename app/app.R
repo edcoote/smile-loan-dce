@@ -1,184 +1,189 @@
-# app.R --------------------------------------------------------------------
-# Smile Loan DCE — pilot questionnaire (fixed-floor design). Standalone Shiny app.
-# RUN: put engine.R and app.R in the same folder, then in R:
-#        install.packages("shiny")   # once, if needed
-#        shiny::runApp("path/to/this/folder")
-# Only dependency: shiny. Presents the complete 4 x 3 factorial (12 tasks) in full
-# to every respondent, both frames, screener, a personalised monthly figure keyed to
-# the £12,570 floor, a repeated consistency task, and a downloadable response record.
-# --------------------------------------------------------------------------
+# app.R ---------------------------------------------------------------------
+# Barriers to Full-Arch Rehabilitation — survey pathway v2, Shiny implementation.
+#
+# RUN
+#   install.packages("shiny")          # only hard dependency
+#   shiny::runApp("app")               # from the repository root
+#
+# URL PARAMETERS (all optional)
+#   ?admin=<key>          fielding monitor
+#   ?dev=1                developer view on the thank-you page
+#   ?bws_items=7          override item count  (7 | 9 | 11 | 13)
+#   ?dce_tasks=6          override task count
+#   ?dce_block=1          serve one block only
+#   ?split=1              split-sample mode
+#   ?src=fb               record a recruitment source with the response
+#
+# The server is a small state machine over the flow list built in 04-flow.R.
+# All persistence goes through the store in 05-store.R and happens on every
+# page advance, so abandoned responses are retained rather than lost.
+# ---------------------------------------------------------------------------
 
 library(shiny)
-source("engine.R")
 
-acc <- "#3b2a55"   # 21D plum
-card <- function(...) div(style = "background:#fff;border:1px solid #e6ddf0;border-radius:12px;padding:12px 14px;margin-bottom:8px;", ...)
-unset <- function(x) is.null(x) || length(x) == 0 || (length(x) == 1 && x == "")
+for (f in sort(list.files("R", pattern = "[.]R$", full.names = TRUE))) source(f, encoding = "UTF-8")
+
+STORE <- store_init()
 
 ui <- fluidPage(
-  tags$head(tags$style(HTML(paste0(
-    "body{max-width:640px;margin:0 auto;} .btn{border-radius:8px;} ",
-    "h3{color:", acc, ";} .muted{color:#666;font-size:13px;} ",
-    ".prog{color:#888;font-size:12px;} .well{background:#f7f4fb;}")))),
-  titlePanel("Paying for full-jaw treatment \u2014 a short questionnaire"),
-  div(class = "muted", style = "margin-top:-8px;margin-bottom:12px;",
-      "Research pilot. Not a real loan offer; answers change nothing about your care and are anonymous."),
-  uiOutput("body")
+  tags$head(tags$style(HTML(APP_CSS)),
+            tags$meta(name = "viewport", content = "width=device-width, initial-scale=1")),
+  uiOutput("page")
 )
 
 server <- function(input, output, session) {
-  rv <- reactiveValues(started = FALSE, flow = NULL, i = 1, resp = list(),
-                       income = 20000, frame = "clinic", exited = FALSE, msg = NULL)
 
-  n_tasks <- reactive(sum(vapply(rv$flow, function(x) x$type == "task", logical(1))))
-  cur     <- reactive(rv$flow[[rv$i]])
-  task_no <- reactive(sum(vapply(rv$flow[seq_len(rv$i)], function(x) x$type == "task", logical(1))))
+  q <- parseQueryString(isolate(session$clientData$url_search))
 
-  observeEvent(input$btn_start, {
-    fk <- if (input$frame == "Random") sample(c("clinic", "prospective"), 1) else input$frame
-    reviewer <- isTRUE(input$reviewer)
-    d <- dce_design()
-    tasks <- if (reviewer) d else d[sample(nrow(d)), ]
-    fr <- dce_frames[[fk]]
-    fl <- list()
-    if (fr$screener && !reviewer) fl[[length(fl) + 1]] <- list(type = "screener")
-    fl[[length(fl) + 1]] <- list(type = "about")
-    for (r in seq_len(nrow(tasks)))
-      fl[[length(fl) + 1]] <- list(type = "task", row = tasks[r, ], isrepeat = FALSE)
-    if (!reviewer) {
-      rr <- d[d$rep == 1, ][1, ]
-      fl[[length(fl) + 1]] <- list(type = "task", row = rr, isrepeat = TRUE)
-    }
-    fl[[length(fl) + 1]] <- list(type = "end")
-    rv$frame <- fk; rv$flow <- fl; rv$i <- 1; rv$resp <- list()
-    rv$started <- TRUE; rv$exited <- FALSE; rv$msg <- NULL; rv$income <- 20000
-  })
+  cfg <- CFG
+  if (!is.null(q$bws_items)) cfg$bws_items <- as.integer(q$bws_items)
+  if (!is.null(q$dce_tasks)) cfg$dce_tasks <- as.integer(q$dce_tasks)
+  if (!is.null(q$dce_block)) cfg$dce_block <- as.integer(q$dce_block)
+  if (!is.null(q$split))     cfg$split_sample <- identical(q$split, "1")
 
+  is_admin <- !is.null(q$admin) && identical(q$admin, cfg$admin_key)
+
+  rv <- reactiveValues(
+    cfg = cfg, rid = new_rid(), rev = 0L, i = 1L,
+    flow = flow_preamble(), msg = NULL, income = 20000,
+    status = "landed", screen_reason = NULL,
+    meta = list(instrument = INSTRUMENT_ID, app_version = APP_VERSION,
+                design_version = DESIGN_VERSION,
+                config = paste0("bws_items=", cfg$bws_items, ";dce_tasks=", cfg$dce_tasks,
+                                ";block=", cfg$dce_block, ";split=", cfg$split_sample,
+                                ";src=", q$src %||% "direct"),
+                session = substr(session$token, 1, 12)),
+    t_page = Sys.time(), t_start = Sys.time(),
+    dev = identical(q$dev, "1"))
+
+  # --- persistence -------------------------------------------------------
+  flush <- function(cap, status = NULL) {
+    rv$rev <- STORE$next_rev(rv$rid)
+    if (length(cap$meta)) for (nm in names(cap$meta)) rv$meta[[nm]] <- cap$meta[[nm]]
+    if (!is.null(status)) rv$status <- status
+    if (!is.null(cap$items) && nrow(cap$items)) { cap$items$rev <- rv$rev; STORE$append("items", cap$items) }
+    if (!is.null(cap$dce)   && nrow(cap$dce))   { cap$dce$rev   <- rv$rev; STORE$append("dce",   cap$dce) }
+    if (!is.null(cap$bws)   && nrow(cap$bws))   { cap$bws$rev   <- rv$rev; STORE$append("bws",   cap$bws) }
+    meta <- rv$meta
+    meta$status <- rv$status
+    meta$path <- attr(rv$flow, "path"); meta$stage_key <- attr(rv$flow, "stage_key")
+    meta$arm <- attr(rv$flow, "arm"); meta$modules_served <- attr(rv$flow, "modules_served")
+    meta$screen_out_reason <- rv$screen_reason
+    meta$seconds_total <- round(as.numeric(difftime(Sys.time(), rv$t_start, units = "secs")), 1)
+    meta$page_reached <- rv$i; meta$n_pages <- length(rv$flow)
+    STORE$append("respondents", row_respondent(rv$rid, rv$rev, meta))
+  }
+
+  # --- navigation --------------------------------------------------------
   observeEvent(input$btn_next, {
-    it <- cur(); rv$msg <- NULL
-    if (it$type == "screener") {
-      if (unset(input$screen_q)) { rv$msg <- "Please choose an option."; return() }
-      if (input$screen_q == "Yes, already treated") { rv$exited <- TRUE; return() }
-    }
-    if (it$type == "about") {
-      if (unset(input$age) || unset(input$income)) { rv$msg <- "Please answer both."; return() }
-      rv$income <- income_mid(input$income)
-      rv$resp$about <- data.frame(age = input$age, income = input$income, stringsAsFactors = FALSE)
-    }
-    if (it$type == "task") {
-      ch <- input[[paste0("ch_", rv$i)]]; ce <- input[[paste0("ce_", rv$i)]]
-      if (unset(ch) || unset(ce)) {
-        rv$msg <- "Please pick an option and say how sure you are."; return() }
-      row <- it$row
-      rv$resp[[paste0("t", sprintf("%02d", rv$i))]] <- data.frame(
-        order = task_no(), id = row$id, rate = row$rate, fee = row$fee,
-        monthly = round(monthly_repay(row$rate, rv$income), 2),
-        rationality = row$rationality, repeated = as.integer(it$isrepeat),
-        choice = ch, certainty = ce, stringsAsFactors = FALSE)
-    }
-    rv$i <- min(rv$i + 1, length(rv$flow))
-  })
-  observeEvent(input$btn_back, { rv$msg <- NULL; rv$i <- max(1, rv$i - 1) })
-  observeEvent(input$btn_restart, { rv$started <- FALSE; rv$exited <- FALSE })
+    page <- rv$flow[[rv$i]]
+    rv$msg <- validate_page(page, rv$i, input, rv)
+    if (!is.null(rv$msg)) return()
 
-  resp_df <- reactive({
-    rows <- rv$resp[grepl("^t", names(rv$resp))]
-    if (!length(rows)) return(NULL)
-    do.call(rbind, rows)
-  })
+    secs <- round(as.numeric(difftime(Sys.time(), rv$t_page, units = "secs")), 1)
+    cap <- capture_page(page, rv$i, input, rv, secs)
 
-  output$body <- renderUI({
-    if (!rv$started) {
-      return(wellPanel(
-        h3("Set up the run"),
-        div(class = "muted", "For the pilot: choose a frame, or leave on Random to mimic a real respondent."),
-        radioButtons("frame", "Frame", c("In clinic" = "clinic", "Patient group" = "prospective", "Random"), inline = TRUE, selected = "clinic"),
-        checkboxInput("reviewer", "Reviewer mode \u2014 walk all 12 tasks in order (no repeat)", FALSE),
-        actionButton("btn_start", "Start", class = "btn-primary")))
+    # The screener is the only page that changes the shape of what follows.
+    if (identical(page$type, "screener")) {
+      a <- setNames(lapply(SCREENER, function(it) input[[pid(rv$i, it$id)]]),
+                    vapply(SCREENER, `[[`, "", "id"))
+      reason <- screen_out_reason(a)
+      if (!is.null(reason)) {
+        rv$screen_reason <- reason
+        rv$flow <- c(rv$flow, list(list(type = "screened_out", module = "screened_out")))
+        flush(cap, status = "screened_out")
+        rv$i <- length(rv$flow); rv$t_page <- Sys.time()
+        return()
+      }
+      rest <- flow_build(a, rv$cfg)
+      new_flow <- c(rv$flow, rest)
+      for (at in c("path", "stage_key", "arm", "modules_served"))
+        attr(new_flow, at) <- attr(rest, at)
+      rv$flow <- new_flow
+      rv$status <- "partial"
     }
-    if (rv$exited) {
-      return(card(h3("Thank you"),
-                  p("This questionnaire is for people still considering treatment, so it ends here for you. We appreciate your time."),
-                  actionButton("btn_restart", "Back to start")))
-    }
-    it <- cur(); fr <- dce_frames[[rv$frame]]
-    msg <- if (!is.null(rv$msg)) div(style = "color:#b00;font-size:13px;margin:6px 0;", rv$msg)
-    navrow <- div(style = "display:flex;justify-content:space-between;margin-top:12px;",
-                  if (rv$i > 1) actionButton("btn_back", "Back") else span(),
-                  actionButton("btn_next", "Next", class = "btn-primary"))
 
-    if (it$type == "screener") {
-      return(tagList(card(
-        h3("First, one quick check"),
-        p("Have you already had full-jaw dental implant treatment with 21D?"),
-        radioButtons("screen_q", NULL, c("Yes, already treated", "No, still considering it"), selected = character(0)),
-        div(class = "muted", "\u201CYes\u201D ends the survey \u2014 already-treated patients would distort the estimate.")),
-        msg, navrow))
+    if (identical(page$type, "battery_mixed") && identical(page$module, "core_enabling")) {
+      inc <- input[[pid(rv$i, "enab_income")]]
+      if (!unset(inc)) rv$income <- income_mid(inc)
     }
-    if (it$type == "about") {
-      return(tagList(card(
-        h3("A little about you"),
-        div(class = "muted", "So the monthly figures can be made realistic for you."),
-        radioButtons("age", "Your age band",
-          c("35\u201339","40\u201344","45\u201349","50\u201354","55\u201359","60\u201364","65\u201369","70\u201374","75\u201379","80+"),
-          selected = character(0), inline = TRUE),
-        radioButtons("income", "Your earned income (wages only, not pension)",
-          c("Under \u00A312,570","\u00A312,570\u2013\u00A320,000","\u00A320,000\u2013\u00A330,000","\u00A330,000\u2013\u00A345,000","\u00A345,000 or more"),
-          selected = character(0))),
-        msg, navrow))
-    }
-    if (it$type == "task") {
-      row <- it$row; mo <- monthly_repay(row$rate, rv$income); below <- rv$income <= FLOOR
-      hdr <- if (isTRUE(it$isrepeat)) span(style = "color:#7d4fa8;", "\u21BB One more, similar to an earlier one")
-             else span(class = "prog", paste0("Task ", task_no(), " of ", n_tasks()))
-      loan_line <- if (below)
-        "At your income you would make no repayments \u2014 repayments apply only to earnings above the \u00A312,570 personal allowance, and any balance is written off at retirement."
-      else
-        paste0("\u2248 ", fmt_gbp(mo), "/month at your income, repaid from wages until you retire, then written off.")
-      return(tagList(
-        div(style = "display:flex;justify-content:space-between;", hdr),
-        h3("Which would you choose?"),
-        card(
-          div(style = "font-size:12px;color:#7d4fa8;font-weight:600;", "SMILE LOAN"),
-          p(HTML(paste0("Repay <b>", row$rate, "%</b> of your earnings above <b>\u00A312,570</b> (the tax-free personal allowance)."))),
-          p(HTML(paste0("One-off upfront fee: <b>", fmt_gbp(row$fee), "</b>."))),
-          div(class = "muted", loan_line),
-          div(class = "muted", style = "border-top:1px solid #eee;margin-top:8px;padding-top:6px;",
-              "No deposit \u00B7 nothing taken from your pension \u00B7 repaid only from wages \u00B7 written off at retirement or on death")),
-        card(div(style = "font-size:12px;color:#666;font-weight:600;", toupper(fr$sq_head)), p(fr$sq_body)),
-        radioButtons(paste0("ch_", rv$i), "Your choice", c("Smile Loan" = "loan", setNames("sq", fr$sq_head)), selected = character(0)),
-        radioButtons(paste0("ce_", rv$i), "How sure are you?", c("Definitely", "Probably", "Might"), selected = character(0), inline = TRUE),
-        msg, navrow))
-    }
-    # end
-    tagList(card(
-      h3("Last question"),
-      p("If you went ahead with treatment, how would you most likely pay for it?"),
-      radioButtons("funding", NULL, c("Savings", "Credit card", "Family loan", "Bank loan", "Couldn't afford it"), selected = character(0)),
-      hr(),
-      h3("Your responses"),
-      div(class = "muted", paste0("Frame: ", fr$label, " \u00B7 floor \u00A312,570")),
-      tableOutput("summary"),
-      downloadButton("dl", "Download responses (CSV)"),
-      actionButton("btn_restart", "Start again")))
+
+    last <- rv$i >= length(rv$flow) - 1L &&
+            identical(rv$flow[[length(rv$flow)]]$type, "thanks")
+    flush(cap, status = if (identical(page$type, "demographics")) "complete" else rv$status)
+
+    rv$i <- min(rv$i + 1L, length(rv$flow))
+    rv$t_page <- Sys.time()
+    session$sendCustomMessage("scrollTop", list())
   })
 
-  output$summary <- renderTable({
-    df <- resp_df(); if (is.null(df)) return(NULL)
-    data.frame(Task = df$order, Terms = paste0(df$rate, "%, fee \u00A3", df$fee),
-               Monthly = fmt_gbp(df$monthly),
-               Check = ifelse(df$repeated == 1, "repeat", ifelse(df$rationality == 1, "best-terms", "")),
-               Choice = ifelse(df$choice == "loan", "Loan", "Status quo"),
-               Sure = df$certainty, check.names = FALSE)
+  observeEvent(input$btn_back, {
+    rv$msg <- NULL
+    rv$i <- max(2L, rv$i - 1L)   # never back into the landing page after consent
+    rv$t_page <- Sys.time()
   })
 
-  output$dl <- downloadHandler(
-    filename = function() paste0("dce_pilot_", rv$frame, "_", format(Sys.time(), "%Y%m%d_%H%M%S"), ".csv"),
+  # --- render ------------------------------------------------------------
+  output$page <- renderUI({
+    if (is_admin) return(admin_ui())
+    render_page(rv$flow[[rv$i]], rv$i, rv)
+  })
+
+  # --- developer view ----------------------------------------------------
+  my_rows <- reactive({
+    db <- tryCatch(STORE$read(), error = function(e) NULL)
+    if (is.null(db)) return(NULL)
+    d <- store_latest(db)
+    lapply(d, function(x) x[x$rid == rv$rid, , drop = FALSE])
+  })
+
+  output$dev_summary <- renderTable({
+    d <- my_rows(); if (is.null(d)) return(NULL)
+    data.frame(table = names(d), rows = vapply(d, nrow, integer(1)), row.names = NULL)
+  })
+
+  output$dl_me <- downloadHandler(
+    filename = function() paste0(rv$rid, ".csv"),
     content = function(file) {
-      df <- resp_df()
-      if (!is.null(rv$resp$about)) { df$age <- rv$resp$about$age; df$income_band <- rv$resp$about$income }
-      df$funding <- if (!is.null(input$funding)) input$funding else NA
-      write.csv(df, file, row.names = FALSE)
+      d <- my_rows()
+      utils::write.csv(if (is.null(d)) data.frame() else d$items, file, row.names = FALSE)
+    })
+
+  # --- admin -------------------------------------------------------------
+  stats <- reactive({
+    invalidateLater(15000, session)
+    admin_stats(STORE$read(), rv$cfg)
+  })
+
+  output$adm_cherries <- renderTable(stats()$cherries)
+  output$adm_reasons  <- renderTable(stats()$reasons)
+  output$adm_quota    <- renderTable(stats()$quota)
+  output$adm_arms     <- renderTable(stats()$arms)
+  output$adm_burden   <- renderTable(stats()$burden)
+  output$adm_dq       <- renderTable(stats()$dq)
+  output$adm_bws_cat  <- renderTable(bws_catalogue_table())
+  output$adm_grid     <- renderTable(admin_burden_grid(rv$cfg))
+  output$adm_burden_total <- renderText({
+    s <- stats()
+    sprintf("Assumed total %s \u00B7 observed median %s",
+            fmt_mmss(s$assumed_total),
+            if (is.na(s$median_total)) "no completions yet" else fmt_mmss(s$median_total))
+  })
+
+  output$dl_xlsx <- downloadHandler(
+    filename = function() paste0("barriers_v2_", format(Sys.time(), "%Y%m%d_%H%M"), ".xlsx"),
+    content = function(file) store_export(STORE, file))
+
+  output$dl_zip <- downloadHandler(
+    filename = function() paste0("barriers_v2_", format(Sys.time(), "%Y%m%d_%H%M"), ".zip"),
+    content = function(file) {
+      d <- store_latest(STORE$read())
+      tmp <- file.path(tempdir(), paste0("csv", as.integer(runif(1, 1e5, 9e5))))
+      dir.create(tmp, showWarnings = FALSE)
+      for (nm in names(d))
+        utils::write.csv(d[[nm]], file.path(tmp, paste0(nm, ".csv")), row.names = FALSE)
+      wd <- setwd(tmp); on.exit(setwd(wd), add = TRUE)
+      utils::zip(file, files = list.files(tmp), flags = "-r9Xq")
     })
 }
 

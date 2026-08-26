@@ -26,6 +26,8 @@ jobs:
           packages: |
             any::shiny
             any::shinylive
+      - name: Run design and pipeline checks
+        run: Rscript dev/check.R
       - name: Export shinylive site
         run: Rscript -e 'shinylive::export("app", "_site")'
       - name: Upload Pages artifact

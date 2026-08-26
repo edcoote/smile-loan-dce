@@ -1,0 +1,244 @@
+# 05-store.R ----------------------------------------------------------------
+# Storage layer.
+#
+# DESIGN
+# * Append-only. Nothing is ever updated in place; going Back and changing an
+#   answer writes a new row with a higher `rev`. Readers collapse to the last
+#   revision per key. This keeps the audit trail intact and makes concurrent
+#   writes safe without transactions.
+# * Write-through. Every page advance flushes to the backend, so partial
+#   responses are retained and reportable, as the v2 field controls require.
+#   A respondent who abandons at DCE task 7 leaves seven usable tasks.
+# * Four tables, tidy long, keyed on `rid`:
+#     respondents  one row per revision: routing, arm, config, status, timings
+#     items        one row per item answered (screener, core, demographics)
+#     dce          one row per ALTERNATIVE per task (i.e. two rows per task)
+#     bws          one row per ITEM SHOWN per set, with best/worst indicators
+#   The dce and bws shapes are already what mlogit/apollo/support.BWS expect,
+#   so the analysis pipeline does not have to reshape anything.
+# * Backends share one interface, so the same app runs on a server (csv),
+#   in the browser (memory, download-only), or against Supabase (postgrest).
+# ---------------------------------------------------------------------------
+
+STORE_TABLES <- c("respondents", "items", "dce", "bws")
+
+# Blank typed frames, so an empty store still has a schema.
+store_schema <- function() list(
+  respondents = data.frame(
+    rid = character(), rev = integer(), ts_utc = character(), status = character(),
+    path = character(), stage_key = character(), arm = character(),
+    modules_served = character(), age_band = character(), quota_band = character(),
+    screen_out_reason = character(), consent = integer(),
+    mdas_total = integer(), mdas_flag = character(),
+    dominance_failed = integer(), income_mid = numeric(),
+    seconds_total = numeric(), page_reached = integer(), n_pages = integer(),
+    instrument = character(), app_version = character(), design_version = character(),
+    config = character(), session = character(), stringsAsFactors = FALSE),
+  items = data.frame(
+    rid = character(), rev = integer(), ts_utc = character(), module = character(),
+    item_id = character(), value = character(), seconds = numeric(),
+    stringsAsFactors = FALSE),
+  dce = data.frame(
+    rid = character(), rev = integer(), ts_utc = character(), task_order = integer(),
+    set_id = character(), block = integer(), dominance = integer(), side_flipped = integer(),
+    alt = character(), rate = numeric(), fee = numeric(), monthly = numeric(),
+    chosen = integer(), stage2_take = character(), stage2_outcome = character(),
+    seconds = numeric(), stringsAsFactors = FALSE),
+  bws = data.frame(
+    rid = character(), rev = integer(), ts_utc = character(), set_order = integer(),
+    set_id = character(), position = integer(), item_id = character(),
+    best = integer(), worst = integer(), seconds = numeric(), stringsAsFactors = FALSE)
+)
+
+# --- Backend: in-memory (default in the browser / shinylive) ---------------
+store_memory <- function() {
+  db <- store_schema()
+  rev <- new.env(parent = emptyenv())
+  list(
+    kind = "memory",
+    next_rev = function(rid) { k <- paste0("r", rid); v <- (rev[[k]] %||% 0L) + 1L; rev[[k]] <- v; v },
+    append = function(table, df) { if (nrow(df)) db[[table]] <<- rbind(db[[table]], df); invisible(TRUE) },
+    read = function() db,
+    healthy = function() TRUE
+  )
+}
+
+# --- Backend: CSV on disk (default on a server) ---------------------------
+# One file per table, appended under a lock. dir.create is atomic on POSIX and
+# on Windows, which is enough for the concurrency a survey generates.
+store_csv <- function(path = CFG$store_path) {
+  dir.create(path, recursive = TRUE, showWarnings = FALSE)
+  files <- setNames(file.path(path, paste0(STORE_TABLES, ".csv")), STORE_TABLES)
+  sch <- store_schema()
+  for (t in STORE_TABLES)
+    if (!file.exists(files[[t]]))
+      utils::write.csv(sch[[t]], files[[t]], row.names = FALSE, fileEncoding = "UTF-8")
+
+  with_lock <- function(expr) {
+    lock <- file.path(path, ".lock")
+    for (i in 1:200) {
+      if (dir.create(lock, showWarnings = FALSE)) {
+        on.exit(unlink(lock, recursive = TRUE), add = TRUE)
+        return(force(expr))
+      }
+      Sys.sleep(0.01)
+    }
+    warning("store_csv: could not acquire lock; writing without it")
+    force(expr)
+  }
+
+  # Revision counters are cached per rid. A rid belongs to exactly one session,
+  # so the cache is authoritative after the first lookup; without it every page
+  # advance would re-read the whole respondents file and fielding would degrade
+  # quadratically in the number of responses collected.
+  rev <- new.env(parent = emptyenv())
+
+  list(
+    kind = "csv",
+    next_rev = function(rid) {
+      k <- paste0("r", rid)
+      if (is.null(rev[[k]])) {
+        rev[[k]] <- with_lock({
+          d <- utils::read.csv(files[["respondents"]], stringsAsFactors = FALSE, colClasses = "character")
+          r <- if (nrow(d)) suppressWarnings(as.integer(d$rev[d$rid == rid])) else integer(0)
+          if (!length(r) || all(is.na(r))) 0L else max(r, na.rm = TRUE)
+        })
+      }
+      rev[[k]] <- rev[[k]] + 1L
+      rev[[k]]
+    },
+    append = function(table, df) {
+      if (!nrow(df)) return(invisible(TRUE))
+      with_lock(utils::write.table(df, files[[table]], sep = ",", row.names = FALSE,
+                                   col.names = FALSE, append = TRUE, qmethod = "double",
+                                   fileEncoding = "UTF-8"))
+      invisible(TRUE)
+    },
+    read = function() {
+      with_lock(setNames(lapply(STORE_TABLES, function(t)
+        utils::read.csv(files[[t]], stringsAsFactors = FALSE)), STORE_TABLES))
+    },
+    healthy = function() all(file.exists(files))
+  )
+}
+
+# --- Backend: Supabase / PostgREST ----------------------------------------
+# Same four tables. DDL and row-level-security policy are in sql/schema.sql.
+# The anon key must be INSERT-only: this app never needs to read back, and the
+# admin panel should point at a service-role connection, not the survey's.
+store_postgrest <- function(url = Sys.getenv("SUPABASE_URL"),
+                            key = Sys.getenv("SUPABASE_ANON_KEY"),
+                            schema = "survey") {
+  if (!nzchar(url) || !nzchar(key))
+    stop("store_postgrest needs SUPABASE_URL and SUPABASE_ANON_KEY")
+  if (!requireNamespace("httr", quietly = TRUE))
+    stop("store_postgrest needs the httr package")
+  rev <- new.env(parent = emptyenv())
+  post <- function(table, df) {
+    r <- httr::POST(
+      paste0(sub("/$", "", url), "/rest/v1/", table),
+      httr::add_headers(apikey = key, Authorization = paste("Bearer", key),
+                        "Content-Type" = "application/json",
+                        "Content-Profile" = schema, Prefer = "return=minimal"),
+      body = jsonlite::toJSON(df, na = "null", auto_unbox = FALSE), encode = "raw")
+    if (httr::status_code(r) >= 300)
+      warning("postgrest ", table, ": ", httr::status_code(r), " ",
+              substr(httr::content(r, "text", encoding = "UTF-8"), 1, 200))
+    invisible(httr::status_code(r) < 300)
+  }
+  list(
+    kind = "postgrest",
+    next_rev = function(rid) { k <- paste0("r", rid); v <- (rev[[k]] %||% 0L) + 1L; rev[[k]] <- v; v },
+    append = function(table, df) if (nrow(df)) post(table, df) else invisible(TRUE),
+    read = function() stop("postgrest backend is insert-only; read via the service-role connection"),
+    healthy = function() TRUE
+  )
+}
+
+# --- Factory ---------------------------------------------------------------
+# "auto" picks csv when the filesystem is writable (server) and memory when it
+# is not (shinylive in the browser), so one codebase serves both deployments.
+store_init <- function(backend = CFG$store_backend, path = CFG$store_path) {
+  if (identical(backend, "auto")) {
+    ok <- tryCatch({ dir.create(path, recursive = TRUE, showWarnings = FALSE)
+                     f <- file.path(path, ".probe"); file.create(f); unlink(f); TRUE },
+                   error = function(e) FALSE, warning = function(w) FALSE)
+    backend <- if (isTRUE(ok)) "csv" else "memory"
+  }
+  switch(backend,
+    csv = store_csv(path), memory = store_memory(), postgrest = store_postgrest(),
+    stop("Unknown store backend: ", backend))
+}
+
+# --- Row builders ----------------------------------------------------------
+# Kept separate from the server so dev/simulate.R can produce identically
+# shaped data without Shiny.
+row_respondent <- function(rid, rev, meta) {
+  base <- store_schema()$respondents
+  x <- as.list(meta)[names(base)]
+  names(x) <- names(base)
+  x$rid <- rid; x$rev <- rev; x$ts_utc <- now_utc()
+  for (nm in names(x)) if (is.null(x[[nm]]) || length(x[[nm]]) == 0) x[[nm]] <- NA
+  as.data.frame(x, stringsAsFactors = FALSE)
+}
+
+rows_items <- function(rid, rev, module, answers, seconds = NA_real_) {
+  answers <- answers[!vapply(answers, unset, logical(1))]
+  if (!length(answers)) return(store_schema()$items)
+  data.frame(rid = rid, rev = rev, ts_utc = now_utc(), module = module,
+             item_id = names(answers),
+             value = vapply(answers, function(v) paste(as.character(v), collapse = "|"), character(1)),
+             seconds = seconds, row.names = NULL, stringsAsFactors = FALSE)
+}
+
+rows_dce <- function(rid, rev, row, choice, take, outcome, income, seconds) {
+  data.frame(
+    rid = rid, rev = rev, ts_utc = now_utc(), task_order = as.integer(row$task_order),
+    set_id = row$set_id, block = as.integer(row$block), dominance = as.integer(row$dominance),
+    side_flipped = as.integer(row$side_flipped), alt = c("A", "B"),
+    rate = c(row$a_rate, row$b_rate), fee = c(row$a_fee, row$b_fee),
+    monthly = c(monthly_repay(row$a_rate, income), monthly_repay(row$b_rate, income)),
+    chosen = as.integer(c(choice == "A", choice == "B")),
+    stage2_take = take %||% NA_character_, stage2_outcome = outcome %||% NA_character_,
+    seconds = seconds, row.names = NULL, stringsAsFactors = FALSE)
+}
+
+rows_bws <- function(rid, rev, set, best_item, worst_item, seconds) {
+  ids <- BWS_ITEMS$item_id[set$items]
+  data.frame(
+    rid = rid, rev = rev, ts_utc = now_utc(), set_order = as.integer(set$set_order),
+    set_id = set$set_id, position = seq_along(ids), item_id = ids,
+    best = as.integer(ids == (best_item %||% "")),
+    worst = as.integer(ids == (worst_item %||% "")),
+    seconds = seconds, row.names = NULL, stringsAsFactors = FALSE)
+}
+
+# --- Reading and export ----------------------------------------------------
+# Collapse the append-only log to the latest revision per key.
+store_latest <- function(db) {
+  last <- function(d, keys) {
+    if (!nrow(d)) return(d)
+    d <- d[order(d$rid, d$rev), ]
+    k <- do.call(paste, c(d[keys], sep = "\r"))
+    d[!duplicated(k, fromLast = TRUE), , drop = FALSE]
+  }
+  list(
+    respondents = last(db$respondents, "rid"),
+    items = last(db$items, c("rid", "item_id")),
+    dce   = last(db$dce,   c("rid", "set_id", "alt")),
+    bws   = last(db$bws,   c("rid", "set_id", "item_id"))
+  )
+}
+
+store_export <- function(store, file, latest = TRUE) {
+  db <- store$read()
+  if (latest) db <- store_latest(db)
+  db$README <- data.frame(
+    field = c("instrument", "app_version", "design_version", "exported_utc",
+              "respondents", "items", "dce_rows", "bws_rows", "note"),
+    value = c(INSTRUMENT_ID, APP_VERSION, DESIGN_VERSION, now_utc(),
+              nrow(db$respondents), nrow(db$items), nrow(db$dce), nrow(db$bws),
+              "Append-only log collapsed to latest revision per key. dce has two rows per task (one per alternative); bws has one row per item shown."),
+    stringsAsFactors = FALSE)
+  write_workbook(db[c("README", STORE_TABLES)], file)
+}
