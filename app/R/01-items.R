@@ -34,7 +34,8 @@ SCREENER <- list(
                 "I have lost all the teeth in both jaws",
                 "I still have some of my own teeth, but several are failing",
                 "None of these",
-                "I would rather not say")),
+                "I would rather not say",
+                "I have had full-jaw rehabilitation")),
   stage = list(
     id = "scr_stage",
     label = "Which of these is closest to where you are with full-jaw implant treatment?",
@@ -103,7 +104,7 @@ PATH_EXTRA <- list(
 # VERBATIM_REQUIRED — AOHS 2023, single self-rated oral health item, OGL v3.0.
 AOHS <- list(
   id = "core_srh",
-  label = "[VERBATIM_REQUIRED \u2014 AOHS 2023] Overall, how would you describe the health of your mouth?",
+  label = "Overall, how would you describe the health of your mouth?",
   options = c("Very good", "Good", "Fair", "Bad", "Very bad"),
   source = "Adult Oral Health Survey 2023, single five-point item, OGL v3.0")
 
